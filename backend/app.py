@@ -3152,15 +3152,58 @@ def api_broker_connect():
 @app.route("/api/broker/auth/status")
 def api_broker_auth_status():
     """
-    AngelOne auth is non-interactive (client code + password + TOTP secret
-    all live in .env, computed via pyotp at connect time) — there's no OAuth
-    redirect step like Zerodha had. This just reports whether the configured
-    credentials produced a live session.
+    Two ways to be connected: the automatic .env path (client code + PIN +
+    TOTP secret, computed via pyotp — see OrderManager.connect(), used at
+    Flask startup) or the manual dashboard Connect below. Either way, this
+    just reports whether it produced a live session — there's no OAuth
+    redirect step like Zerodha had.
     """
     from broker.angelone_adapter import AngelOneAdapter
     if isinstance(order_manager.adapter, AngelOneAdapter):
-        return jsonify({"connected": order_manager.adapter.is_connected, "broker": "AngelOne"})
+        return jsonify({
+            "connected": order_manager.adapter.is_connected,
+            "broker": "AngelOne",
+            "client_code": order_manager.adapter.client_code if order_manager.adapter.is_connected else None,
+        })
     return jsonify({"connected": False, "message": "Not using AngelOne adapter"})
+
+
+@app.route("/api/broker/angelone/connect", methods=["POST"])
+def api_broker_angelone_connect():
+    """
+    Manual Connect: client ID, PIN/password, and the current 6-digit TOTP
+    code (read off the user's own authenticator app) are typed into the
+    dashboard and sent straight here — this request never passes through
+    any chat session, and none of these values are logged.
+    """
+    from broker.angelone_adapter import AngelOneAdapter
+    if not isinstance(order_manager.adapter, AngelOneAdapter):
+        return jsonify({"connected": False, "error": "Not using AngelOne adapter"}), 400
+
+    body = request.get_json(force=True, silent=True) or {}
+    client_code = str(body.get("client_code", "")).strip()
+    pin = str(body.get("pin", "")).strip()
+    totp = str(body.get("totp", "")).strip()
+
+    if not (client_code and pin and totp):
+        return jsonify({"connected": False, "error": "client_code, pin, and totp are all required"}), 400
+
+    ok = order_manager.adapter.connect_manual(client_code, pin, totp)
+    return jsonify({
+        "connected": ok,
+        "client_code": order_manager.adapter.client_code if ok else None,
+        "error": None if ok else "Login failed — check client ID, PIN, and that the TOTP code hasn't expired",
+    })
+
+
+@app.route("/api/broker/angelone/disconnect", methods=["POST"])
+def api_broker_angelone_disconnect():
+    """Drop the current AngelOne session — dashboard 'Disconnect' action."""
+    from broker.angelone_adapter import AngelOneAdapter
+    if not isinstance(order_manager.adapter, AngelOneAdapter):
+        return jsonify({"connected": False, "error": "Not using AngelOne adapter"}), 400
+    order_manager.adapter.disconnect()
+    return jsonify({"connected": False})
 
 
 @app.route("/api/broker/kill", methods=["POST"])

@@ -93,14 +93,39 @@ class AngelOneAdapter(BrokerAdapter):
     def __init__(self):
         self._smart = None  # SmartApi.SmartConnect instance
         self._connected = False
+        self._client_code: str = ""
 
     # ── Authentication ────────────────────────────────────────────────
 
     def authenticate(self) -> bool:
+        """
+        Non-interactive path for background/startup connects: reads
+        client code, PIN, and the TOTP *secret* from .env and computes the
+        live 6-digit code via pyotp. Used by OrderManager.connect() at
+        Flask startup.
+        """
         if not (ANGEL_API_KEY and ANGEL_CLIENT_CODE and ANGEL_PASSWORD_OR_PIN and ANGEL_TOTP_SECRET):
             logger.error("AngelOne credentials not fully set in .env")
             return False
 
+        totp_code = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        return self._login(ANGEL_CLIENT_CODE, ANGEL_PASSWORD_OR_PIN, totp_code)
+
+    def connect_manual(self, client_code: str, pin: str, totp_code: str) -> bool:
+        """
+        Interactive path for the dashboard's "Connect" action: client code,
+        PIN/password, and the current 6-digit TOTP code (read off the
+        user's own authenticator app) are typed into the browser and sent
+        straight to this Flask backend — never through any chat session.
+        Doesn't require ANGEL_TOTP_SECRET to be stored anywhere.
+        """
+        if not (ANGEL_API_KEY and client_code and pin and totp_code):
+            logger.error("AngelOne connect: client code, PIN, and TOTP code are all required "
+                         "(ANGEL_API_KEY must also be set in .env)")
+            return False
+        return self._login(client_code, pin, totp_code)
+
+    def _login(self, client_code: str, pin: str, totp_code: str) -> bool:
         try:
             from SmartApi import SmartConnect
         except ImportError:
@@ -109,8 +134,7 @@ class AngelOneAdapter(BrokerAdapter):
 
         try:
             self._smart = SmartConnect(api_key=ANGEL_API_KEY)
-            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-            session = self._smart.generateSession(ANGEL_CLIENT_CODE, ANGEL_PASSWORD_OR_PIN, totp)
+            session = self._smart.generateSession(client_code, pin, totp_code)
 
             if not session.get("status"):
                 logger.error(f"AngelOne login failed: {session.get('message')}")
@@ -118,7 +142,8 @@ class AngelOneAdapter(BrokerAdapter):
                 return False
 
             self._connected = True
-            logger.info(f"AngelOne authenticated: {ANGEL_CLIENT_CODE}")
+            self._client_code = client_code
+            logger.info(f"AngelOne authenticated: {client_code}")
             return True
 
         except Exception as e:
@@ -126,9 +151,24 @@ class AngelOneAdapter(BrokerAdapter):
             self._connected = False
             return False
 
+    def disconnect(self):
+        """Drop the current session — dashboard 'Disconnect' action."""
+        if self._smart is not None and self._connected:
+            try:
+                self._smart.terminateSession(self._client_code or ANGEL_CLIENT_CODE)
+            except Exception as e:
+                logger.debug(f"AngelOne terminateSession failed (ignoring): {e}")
+        self._smart = None
+        self._connected = False
+        self._client_code = ""
+
     @property
     def is_connected(self) -> bool:
         return self._connected and self._smart is not None
+
+    @property
+    def client_code(self) -> str:
+        return self._client_code or ANGEL_CLIENT_CODE
 
     @property
     def broker_name(self) -> str:

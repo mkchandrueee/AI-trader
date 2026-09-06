@@ -4,22 +4,69 @@ import { useEffect, useState, useCallback } from "react";
 import Sidebar from "@/components/Sidebar";
 import RiskProfileCard from "@/components/RiskProfileCard";
 import { fetchJSON, postJSON, type RiskProfile } from "@/lib/api";
-import { Play } from "lucide-react";
+import { Play, Plug, PlugZap } from "lucide-react";
 
 type RiskLevel = "low" | "medium" | "high";
 const riskColors: Record<string, string> = { low: "#4da6ff", medium: "#e8c300", high: "#00e87b" };
+
+interface BrokerAuthStatus {
+  connected: boolean;
+  broker?: string;
+  client_code?: string | null;
+  message?: string;
+}
 
 export default function SettingsPage() {
   const [profiles, setProfiles] = useState<Record<RiskLevel, RiskProfile> | null>(null);
   const [activeRisk, setActiveRisk] = useState<RiskLevel>("medium");
   const [runMsg, setRunMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
+  const [brokerStatus, setBrokerStatus] = useState<BrokerAuthStatus | null>(null);
+  const [clientCode, setClientCode] = useState("");
+  const [pin, setPin] = useState("");
+  const [totp, setTotp] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     const p = await fetchJSON<Record<RiskLevel, RiskProfile>>("/api/risk/profiles").catch(() => null);
     if (p) setProfiles(p as Record<RiskLevel, RiskProfile>);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const loadBrokerStatus = useCallback(async () => {
+    const s = await fetchJSON<BrokerAuthStatus>("/api/broker/auth/status").catch(() => null);
+    if (s) setBrokerStatus(s);
+  }, []);
+
+  useEffect(() => { load(); loadBrokerStatus(); }, [load, loadBrokerStatus]);
+
+  const connectAngelOne = async () => {
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const res = await postJSON<{ connected: boolean; client_code: string | null; error: string | null }>(
+        "/api/broker/angelone/connect",
+        { client_code: clientCode, pin, totp }
+      );
+      if (res.connected) {
+        setBrokerStatus({ connected: true, broker: "AngelOne", client_code: res.client_code });
+        // Clear credential fields from memory as soon as they're no longer needed.
+        setPin("");
+        setTotp("");
+      } else {
+        setConnectError(res.error || "Connect failed");
+      }
+    } catch {
+      setConnectError("Could not reach the backend — is backend/app.py running?");
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const disconnectAngelOne = async () => {
+    await postJSON("/api/broker/angelone/disconnect").catch(() => null);
+    setBrokerStatus({ connected: false });
+  };
 
   const runBacktest = async () => {
     setRunMsg(null);
@@ -38,6 +85,94 @@ export default function SettingsPage() {
         <div className="mb-5">
           <h1 className="text-sm font-bold uppercase tracking-wider" style={{ color: '#00e87b' }}>Settings</h1>
           <p className="text-[10px] mt-0.5" style={{ color: '#3d4450' }}>RISK PROFILES, EXECUTION, SYSTEM CONFIG</p>
+        </div>
+
+        {/* AngelOne Connect */}
+        <div className="t-panel p-5 mb-4">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-[12px] font-bold uppercase tracking-wider" style={{ color: '#c8cdd5' }}>AngelOne Connect</h2>
+            {brokerStatus?.connected ? (
+              <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: '#00e87b' }}>
+                <PlugZap className="w-3.5 h-3.5" /> Connected{brokerStatus.client_code ? ` — ${brokerStatus.client_code}` : ""}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: '#5a6270' }}>
+                <Plug className="w-3.5 h-3.5" /> Not Connected
+              </span>
+            )}
+          </div>
+          <p className="text-[10px] mb-4" style={{ color: '#5a6270' }}>
+            Enter your client ID, PIN/password, and the current 6-digit code from your authenticator app.
+            This goes straight to your own backend on localhost — never anywhere else. Nothing here is saved to disk;
+            re-enter the TOTP code each time it expires.
+          </p>
+
+          {brokerStatus?.connected ? (
+            <button
+              onClick={disconnectAngelOne}
+              className="t-btn px-4 py-2 text-[10px] font-bold uppercase tracking-wider"
+              style={{ borderColor: '#ff3e3e', color: '#ff3e3e' }}
+            >
+              Disconnect
+            </button>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>Client ID</label>
+                  <input
+                    value={clientCode}
+                    onChange={(e) => setClientCode(e.target.value)}
+                    autoComplete="off"
+                    className="w-full px-3 py-[6px] text-[12px]"
+                    style={{ background: '#0e1117', border: '1px solid #252a33', color: '#c8cdd5' }}
+                    placeholder="A123456"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>PIN / Password</label>
+                  <input
+                    type="password"
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value)}
+                    autoComplete="off"
+                    className="w-full px-3 py-[6px] text-[12px]"
+                    style={{ background: '#0e1117', border: '1px solid #252a33', color: '#c8cdd5' }}
+                    placeholder="••••"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>TOTP Code</label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={totp}
+                    onChange={(e) => setTotp(e.target.value.replace(/\D/g, ""))}
+                    onKeyDown={(e) => e.key === "Enter" && connectAngelOne()}
+                    autoComplete="off"
+                    className="w-full px-3 py-[6px] text-[12px] tracking-[3px]"
+                    style={{ background: '#0e1117', border: '1px solid #252a33', color: '#c8cdd5' }}
+                    placeholder="000000"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={connectAngelOne}
+                  disabled={connecting || !clientCode || !pin || totp.length !== 6}
+                  className="flex items-center gap-2 px-4 py-2 text-[10px] font-bold uppercase tracking-wider transition-all disabled:opacity-40"
+                  style={{ background: '#00e87b', color: '#000' }}
+                >
+                  <Plug className="w-3 h-3" />
+                  {connecting ? "Connecting…" : "Connect"}
+                </button>
+                {connectError && (
+                  <span className="text-[11px]" style={{ color: '#ff3e3e' }}>{connectError}</span>
+                )}
+              </div>
+            </>
+          )}
         </div>
 
         {/* Risk profile selection */}
@@ -115,7 +250,7 @@ export default function SettingsPage() {
               { cmd: "python scripts/train_dqn_exit.py --epochs 10",             desc: "Train DQN agent" },
               { cmd: "python scripts/paper_trade.py --replay 2026-03-20",        desc: "Replay paper trade" },
               { cmd: "python scripts/paper_trade.py",                            desc: "Live paper trading" },
-              { cmd: "python frontend/app.py",                                   desc: "Flask API (5050)" },
+              { cmd: "python backend/app.py",                                     desc: "Flask API (5050)" },
               { cmd: "npm run dev",                                               desc: "Next.js dev (3000)" },
             ].map(({ cmd, desc }) => (
               <div key={cmd} className="flex items-start gap-3">
