@@ -10,8 +10,8 @@
     },
     {
       "name": "Backend (Flask)",
-      "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": ["frontend/app.py"],
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["backend/app.py"],
       "port": 5050
     }
   ]

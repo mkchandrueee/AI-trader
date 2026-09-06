@@ -3336,7 +3336,7 @@ def api_predictions_regime():
 @app.route("/api/scanner/scan")
 def api_scanner_scan():
     """
-    GET /api/scanner/scan?universe=all&direction=all&min_confidence=0&search=&limit=100&index_list=&option_type=&nearest_expiry_only=true
+    GET /api/scanner/scan?universe=all&direction=all&min_confidence=0&search=&limit=100&index_list=&option_type=&nearest_expiry_only=true&sector=&index_type=&sort_by=confidence&include_option_legs=false
     Same candle-quality scoring as math_decision_engine's analyse_side,
     applied across the whole published EOD board. See strategy/market_scanner.py.
     index_list: "" | nifty50 | nifty100 | nifty200 | nifty500 — restricts
@@ -3344,6 +3344,11 @@ def api_scanner_scan():
     universe="options" scores individual CE/PE contracts (strike/expiry/OI/
     volume included) instead of the underlying's own candle; option_type
     ("CE"/"PE") and nearest_expiry_only further narrow that universe.
+    sector: exact Industry match (from the same constituent list) — stocks only.
+    index_type: "" | "fno" | "traded" — restricts index rows to F&O-tradable ones.
+    sort_by: "confidence" | "rr" | "change" | "turnover".
+    include_option_legs: when true, resolves the ATM CE/PE for the top-ranked
+    index/stock rows and runs them through the Trade Decision Engine.
     """
     try:
         from strategy.market_scanner import scan_market
@@ -3356,6 +3361,11 @@ def api_scanner_scan():
             index_list=request.args.get("index_list", ""),
             option_type=request.args.get("option_type", ""),
             nearest_expiry_only=request.args.get("nearest_expiry_only", "true").lower() != "false",
+            sector=request.args.get("sector", ""),
+            index_type=request.args.get("index_type", ""),
+            sort_by=request.args.get("sort_by", "confidence"),
+            include_option_legs=request.args.get("include_option_legs", "false").lower() == "true",
+            top_n_option_legs=int(request.args.get("top_n_option_legs", 10)),
         )
         return jsonify(result)
     except Exception as e:
