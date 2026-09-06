@@ -318,18 +318,27 @@ class NewsSentimentEngine:
     def fetch_all(self, max_age_hours: int = 24) -> List[NewsArticle]:
         """Fetch from all RSS sources and analyze sentiment."""
         all_articles = []
+        seen_urls: set[str] = set()  # the same article can surface from more than
+                                      # one feed (e.g. both Google News searches)
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
 
         for feed_name, feed_url in RSS_FEEDS.items():
             raw_articles = self.fetcher.fetch_rss(feed_name, feed_url)
 
             for raw in raw_articles:
+                url = raw.get("url", "")
+                if url and url in seen_urls:
+                    continue
+
                 # Skip old articles
                 pub = raw["published_at"]
                 if pub.tzinfo is None:
                     pub = pub.replace(tzinfo=timezone.utc)
                 if pub < cutoff:
                     continue
+
+                if url:
+                    seen_urls.add(url)
 
                 # Analyze sentiment on title + summary
                 text = f"{raw['title']}. {raw.get('summary', '')}"

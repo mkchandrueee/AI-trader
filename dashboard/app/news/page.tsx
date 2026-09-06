@@ -159,9 +159,9 @@ export default function NewsBriefPage() {
               <p className="text-[11px] text-center py-6" style={{ color: "#3d4450" }}>No articles in the last 24h.</p>
             ) : (
               <div className="space-y-3">
-                {articles.map((a) => (
+                {articles.map((a, i) => (
                   <a
-                    key={a.url}
+                    key={a.url ? `${a.url}-${i}` : i}
                     href={a.url}
                     target="_blank"
                     rel="noopener noreferrer"

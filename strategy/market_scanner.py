@@ -86,8 +86,14 @@ def _score_row(symbol: str, kind: str, o: float, h: float, l: float, c: float, p
 def _score_equity_bhavcopy(df: pd.DataFrame) -> list[ScanRow]:
     sym_col = _find_col(df, ["symbol"])
     series_col = _find_col(df, ["series"])
-    o_col, h_col, l_col, c_col = (_find_col(df, [n]) for n in ("open", "high", "low", "close"))
-    prev_col = _find_col(df, ["prevclose", "prev_close", "prev. close"])
+    # jugaad-data's current (UDIFF) bhavcopy format uses open_price/high_price/
+    # low_price/close_price, not the classic openprice-style names — accept both
+    # since NSE has changed this format before and may again.
+    o_col = _find_col(df, ["open_price", "openprice", "open"])
+    h_col = _find_col(df, ["high_price", "highprice", "high"])
+    l_col = _find_col(df, ["low_price", "lowprice", "low"])
+    c_col = _find_col(df, ["close_price", "closeprice", "close"])
+    prev_col = _find_col(df, ["prev_close", "prevclose", "prev. close"])
     if not all([sym_col, o_col, h_col, l_col, c_col]):
         logger.warning(f"Equity bhavcopy missing expected columns: {list(df.columns)}")
         return []
