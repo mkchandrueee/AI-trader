@@ -3204,6 +3204,87 @@ def api_broker_exit():
     return jsonify(result)
 
 
+# ── Predictions API (NSE-Neuron: LSTM/BiLSTM/GRU/CNN-LSTM forecasting) ──────
+# Runs training/inference on request, not in a background thread — a forecast
+# call can take a while (model train or warm-start), so the dashboard shows
+# a loading state rather than this blocking the scanner loop.
+
+
+@app.route("/api/predictions/forecast")
+def api_predictions_forecast():
+    """
+    GET /api/predictions/forecast?symbol=NIFTY&algorithm=lstm&force_retrain=false
+    algorithm: lstm | bilstm | gru | cnn_lstm | all
+    """
+    symbol = request.args.get("symbol", "NIFTY").strip().upper()
+    algorithm = request.args.get("algorithm", "lstm").strip().lower()
+    force_retrain = request.args.get("force_retrain", "false").lower() == "true"
+
+    try:
+        from predictions.forecast import forecast_symbol, forecast_all
+        if algorithm == "all":
+            result = forecast_all(symbol, force_retrain=force_retrain)
+        else:
+            result = forecast_symbol(symbol, algorithm=algorithm, force_retrain=force_retrain)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Prediction failed for {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/predictions/regime")
+def api_predictions_regime():
+    """GET /api/predictions/regime?symbol=NIFTY — regime + candlestick patterns, no model training."""
+    symbol = request.args.get("symbol", "NIFTY").strip().upper()
+    try:
+        from predictions.forecast import regime_analysis
+        return jsonify(regime_analysis(symbol))
+    except Exception as e:
+        logger.error(f"Regime analysis failed for {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── News Brief API (free RSS: ET, LiveMint, RBI, SEBI, Google News) ─────────
+
+
+@app.route("/api/news/brief")
+def api_news_brief():
+    """
+    GET /api/news/brief?hours=24 — latest market news with keyword-based
+    sentiment scoring. No API key required for any of it.
+    """
+    hours = int(request.args.get("hours", 24))
+    try:
+        from data.news_sentiment import NewsSentimentEngine
+
+        engine = NewsSentimentEngine()
+        articles = engine.fetch_all(max_age_hours=hours)
+
+        try:
+            engine.store(articles)
+            sentiment = engine.get_market_sentiment(lookback_hours=hours)
+        except Exception as e:
+            logger.warning(f"News sentiment DB read/write skipped: {e}")
+            sentiment = None
+
+        return jsonify({
+            "articles": [
+                {
+                    "title": a.title, "url": a.url, "source": a.source,
+                    "published_at": a.published_at.isoformat(),
+                    "summary": a.summary, "symbols": a.symbols,
+                    "sentiment_label": a.sentiment_label, "sentiment_score": round(a.sentiment_score, 2),
+                    "impact_level": a.impact_level,
+                }
+                for a in articles
+            ],
+            "sentiment": sentiment,
+        })
+    except Exception as e:
+        logger.error(f"News brief failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     initialize()
 

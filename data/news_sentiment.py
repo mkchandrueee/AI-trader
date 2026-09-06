@@ -34,11 +34,17 @@ from utils.logger import get_logger
 logger = get_logger("news_sentiment")
 
 # ── RSS Feed Sources ──────────────────────────────────────────────────────────
+# All free, no API key. RBI/SEBI/Google News additions match what Market
+# Scanner's netlify/functions/market.mjs already uses for its Pre-market board.
 RSS_FEEDS = {
     "et_markets": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
     "et_economy": "https://economictimes.indiatimes.com/news/economy/rssfeeds/1373380680.cms",
     "livemint_markets": "https://www.livemint.com/rss/markets",
     "livemint_money": "https://www.livemint.com/rss/money",
+    "rbi": "https://rbi.org.in/pressreleases_rss.xml",
+    "sebi": "https://www.sebi.gov.in/sebirss.xml",
+    "google_news_markets": "https://news.google.com/rss/search?q=India%20stock%20market%20when%3A1d&hl=en-IN&gl=IN&ceid=IN%3Aen",
+    "google_news_earnings": "https://news.google.com/rss/search?q=India%20company%20earnings%20results%20when%3A1d&hl=en-IN&gl=IN&ceid=IN%3Aen",
 }
 
 # ── Keyword Dictionaries for Sentiment ────────────────────────────────────────
