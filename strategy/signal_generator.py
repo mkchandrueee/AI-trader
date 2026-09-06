@@ -1,11 +1,16 @@
 """
 Signal Generator
 ────────────────
-Implements the three strategies from the Product Vision doc (§9):
+Implements the three strategies from the Product Vision doc (§9), plus one
+deterministic formula-based strategy ported from the NIFTY Option Strategy
+Suite:
 
   1. VWAP Momentum Breakout  – bullish breakout (Buy ATM Call)
   2. Bearish Momentum        – bearish breakdown (Buy ATM Put)
   3. Mean Reversion          – extreme RSI / Bollinger touch
+  4. Math Decision Engine    – ATM CE/PE candle-quality comparison with a
+                                buffered breakout entry (see
+                                strategy/math_decision_strategy.py)
 
 Each strategy returns a Signal dict or None.
 The regime detector determines which strategies are active per scan cycle.
@@ -177,10 +182,17 @@ def mean_reversion(row: dict, symbol: str = "") -> Optional[Signal]:
 # Strategy Registry
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _math_decision_engine(row: dict, symbol: str = ""):
+    """Deterministic option-premium strategy — see strategy/math_decision_strategy.py."""
+    from strategy.math_decision_strategy import generate_signal
+    return generate_signal(row, symbol)
+
+
 STRATEGY_MAP = {
     "vwap_momentum_breakout": vwap_momentum_breakout,
     "bearish_momentum": bearish_momentum,
     "mean_reversion": mean_reversion,
+    "math_decision_engine": _math_decision_engine,
 }
 
 

@@ -1037,7 +1037,7 @@ def replay_day(
             # Reversal strategies (bearish_momentum, mean_reversion) inherently
             # fire against the prior bar's direction — applying this gate to
             # them filters ~20% of winning trades. Only apply to continuation.
-            CONTINUATION_STRATEGIES = {"vwap_momentum_breakout"}
+            CONTINUATION_STRATEGIES = {"vwap_momentum_breakout", "math_decision_engine"}
             if sig.strategy in CONTINUATION_STRATEGIES and len(featured) >= 2:
                 prev_bar = featured.iloc[-2]
                 prev_move_pct = (float(prev_bar["close"]) - float(prev_bar["open"])) / max(float(prev_bar["open"]), 1)

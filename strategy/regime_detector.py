@@ -164,16 +164,20 @@ class RegimeDetector:
 # ── Strategy Regime Mapping ───────────────────────────────────────────────────
 
 REGIME_STRATEGIES = {
-    # Trending regimes: primary directional strategy gets the bonus
-    MarketRegime.TRENDING_BULL: ["vwap_momentum_breakout"],
-    MarketRegime.TRENDING_BEAR: ["bearish_momentum"],
+    # Trending regimes: primary directional strategy gets the bonus.
+    # math_decision_engine is direction-agnostic (driven by ATM CE/PE candle
+    # quality, not the underlying's trend classification), so it rides along
+    # in every regime except LOW_VOLATILITY, where option premiums barely
+    # move and its 15%-of-range breakout buffer would rarely mean anything.
+    MarketRegime.TRENDING_BULL: ["vwap_momentum_breakout", "math_decision_engine"],
+    MarketRegime.TRENDING_BEAR: ["bearish_momentum", "math_decision_engine"],
     # Sideways: mean_reversion is primary, but momentum breakouts/breakdowns are valid too
     # (NIFTY can grind down from a sideways range — bearish_momentum is a real sideways setup)
-    MarketRegime.SIDEWAYS: ["mean_reversion", "bearish_momentum", "vwap_momentum_breakout"],
+    MarketRegime.SIDEWAYS: ["mean_reversion", "bearish_momentum", "vwap_momentum_breakout", "math_decision_engine"],
     # High-vol: both reversion and momentum are valid (fast moves in both directions)
-    MarketRegime.HIGH_VOLATILITY: ["mean_reversion", "bearish_momentum", "vwap_momentum_breakout"],
+    MarketRegime.HIGH_VOLATILITY: ["mean_reversion", "bearish_momentum", "vwap_momentum_breakout", "math_decision_engine"],
     MarketRegime.LOW_VOLATILITY: ["vwap_momentum_breakout"],
-    MarketRegime.UNKNOWN: ["vwap_momentum_breakout", "bearish_momentum", "mean_reversion"],
+    MarketRegime.UNKNOWN: ["vwap_momentum_breakout", "bearish_momentum", "mean_reversion", "math_decision_engine"],
 }
 
 

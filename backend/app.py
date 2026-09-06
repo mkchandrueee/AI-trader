@@ -1076,7 +1076,7 @@ def scan_market():
             # Backtest testing 2026-04-08: applying this gate to reversal
             # strategies filtered 8 MEDIUM trades, net -₹13,872 of filtered
             # profit. Making it strategy-aware restored ~₹10k of that.
-            CONTINUATION_STRATEGIES = {"vwap_momentum_breakout"}
+            CONTINUATION_STRATEGIES = {"vwap_momentum_breakout", "math_decision_engine"}
             if sig.strategy in CONTINUATION_STRATEGIES and len(featured) >= 2:
                 prev_bar = featured.iloc[-2]
                 prev_open = float(prev_bar.get("open", 0))
