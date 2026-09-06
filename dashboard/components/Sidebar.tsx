@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard, TrendingUp, List, BarChart2,
   Settings, Radio, FlaskConical, Brain, Power, Maximize2,
-  Sparkles, ScanSearch, Newspaper,
+  Sparkles, ScanSearch, Newspaper, Sunrise,
 } from "lucide-react";
 import { fetchJSON, postJSON, type LiveState } from "@/lib/api";
 import { useTradingMode } from "@/contexts/TradingModeContext";
@@ -19,6 +19,7 @@ const nav = [
   { href: "/backtest",    label: "BACKTEST",     icon: FlaskConical },
   { href: "/charts",      label: "CHARTS",       icon: BarChart2 },
   { href: "/scanner",     label: "SCANNER",      icon: ScanSearch },
+  { href: "/premarket",   label: "PRE MARKET",   icon: Sunrise },
   { href: "/predictions", label: "AI FORECAST",  icon: Sparkles },
   { href: "/news",        label: "NEWS BRIEF",   icon: Newspaper },
   { href: "/ai",          label: "AI MODELS",    icon: Brain },

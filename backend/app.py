@@ -3373,6 +3373,51 @@ def api_scanner_scan():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Pre-Market API (NextDay Direction Analyser + Option Trade Decision Engine — Live) ──
+
+
+@app.route("/api/premarket/nextday")
+def api_premarket_nextday():
+    """
+    GET /api/premarket/nextday?symbol=NIFTY
+    NextDay Direction Analyser: classic floor pivots on the last completed
+    session's H/L/C, read before the bell. See strategy/premarket.py.
+    """
+    try:
+        from strategy.premarket import nextday_reading
+        result = nextday_reading(request.args.get("symbol", "NIFTY").upper())
+        status = 200 if "error" not in result else 404
+        return jsonify(result), status
+    except Exception as e:
+        logger.error(f"NextDay reading failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/premarket/live")
+def api_premarket_live():
+    """
+    GET /api/premarket/live?symbol=NIFTY&timeframe=5min&mode=opening|latest
+    Option Trade Decision Engine — Live: runs analyse_option_pair on the
+    fixed 09:15-09:20 opening ATM CE/PE candle (mode=opening) or the latest
+    fully closed timeframe candle (mode=latest, default), and reports
+    whether that side still agrees with the NextDay bias and the day's
+    opening reading. Needs an active AngelOne session (Connect in the
+    sidebar) — this reads live option candles, not free EOD data.
+    """
+    try:
+        from strategy.premarket import live_confirmation
+        result = live_confirmation(
+            symbol=request.args.get("symbol", "NIFTY").upper(),
+            timeframe=request.args.get("timeframe", "5min"),
+            mode=request.args.get("mode", "latest"),
+        )
+        status = 200 if "error" not in result else 409
+        return jsonify(result), status
+    except Exception as e:
+        logger.error(f"Live confirmation failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── News Brief API (free RSS: ET, LiveMint, RBI, SEBI, Google News) ─────────
 
 

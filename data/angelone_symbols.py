@@ -109,6 +109,38 @@ class AngelSymbolResolver:
         self.load()
         return self._by_symbol.get(f"{exchange}:{symbol}")
 
+    def option_symbol_for(self, underlying: str, expiry, strike: float, opt_type: str) -> Optional[dict]:
+        """
+        Resolve an option contract by its structured fields rather than
+        guessing a tradingsymbol string. AngelOne's real tradingsymbol for
+        options is "{underlying}{DD}{MMM}{YY}{strike}{CE|PE}" (e.g.
+        "NIFTY08SEP2622100PE") — NOT the "{underlying}{yymmdd}{strike}{type}"
+        format used elsewhere in this project as an internal/DB symbol alias
+        (see backtest/option_resolver.py's build_option_symbol and
+        CLAUDE.md's documented DB convention). token_for() with that
+        DB-style string never matches a real row; this looks up by the
+        instrument master's own expiry/strike/instrumenttype fields instead,
+        so the caller doesn't need to know AngelOne's exact string format.
+
+        `expiry` is a date; `strike` is the actual strike price (e.g. 22100,
+        not AngelOne's internal ×100 integer storage — that scaling is
+        handled here).
+        """
+        self.load()
+        expiry_str = expiry.strftime("%d%b%Y").upper()
+        target_strike = round(float(strike) * 100)
+        opt_type = opt_type.upper()
+        for r in self._rows:
+            if (r.get("name") == underlying and r.get("instrumenttype") == "OPTIDX"
+                    and r.get("expiry") == expiry_str and r.get("exch_seg") == "NFO"
+                    and str(r.get("symbol", "")).endswith(opt_type)):
+                try:
+                    if abs(float(r.get("strike", -1)) - target_strike) < 1:
+                        return r
+                except (TypeError, ValueError):
+                    continue
+        return None
+
     def current_futures_symbol(self, underlying: str) -> Optional[dict]:
         """
         Return the nearest-expiry FUTIDX row for an index underlying
