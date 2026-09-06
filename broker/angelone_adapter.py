@@ -94,6 +94,10 @@ class AngelOneAdapter(BrokerAdapter):
         self._smart = None  # SmartApi.SmartConnect instance
         self._connected = False
         self._client_code: str = ""
+        # AngelOne's own rejection reason (e.g. "Invalid Password", "AB1050:
+        # Invalid Totp") or a local error — never a credential value, safe
+        # to show in the UI and safe to log. See last_error property.
+        self._last_error: str = ""
 
     # ── Authentication ────────────────────────────────────────────────
 
@@ -105,7 +109,8 @@ class AngelOneAdapter(BrokerAdapter):
         Flask startup.
         """
         if not (ANGEL_API_KEY and ANGEL_CLIENT_CODE and ANGEL_PASSWORD_OR_PIN and ANGEL_TOTP_SECRET):
-            logger.error("AngelOne credentials not fully set in .env")
+            self._last_error = "AngelOne credentials not fully set in .env"
+            logger.error(self._last_error)
             return False
 
         totp_code = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
@@ -119,9 +124,13 @@ class AngelOneAdapter(BrokerAdapter):
         straight to this Flask backend — never through any chat session.
         Doesn't require ANGEL_TOTP_SECRET to be stored anywhere.
         """
-        if not (ANGEL_API_KEY and client_code and pin and totp_code):
-            logger.error("AngelOne connect: client code, PIN, and TOTP code are all required "
-                         "(ANGEL_API_KEY must also be set in .env)")
+        if not ANGEL_API_KEY:
+            self._last_error = "ANGEL_API_KEY is not set in .env (create an app at https://smartapi.angelbroking.com)"
+            logger.error(self._last_error)
+            return False
+        if not (client_code and pin and totp_code):
+            self._last_error = "Client code, PIN, and TOTP code are all required"
+            logger.error(self._last_error)
             return False
         return self._login(client_code, pin, totp_code)
 
@@ -129,7 +138,8 @@ class AngelOneAdapter(BrokerAdapter):
         try:
             from SmartApi import SmartConnect
         except ImportError:
-            logger.error("smartapi-python package not installed. Run: pip install smartapi-python")
+            self._last_error = "smartapi-python package not installed. Run: pip install smartapi-python"
+            logger.error(self._last_error)
             return False
 
         try:
@@ -137,19 +147,30 @@ class AngelOneAdapter(BrokerAdapter):
             session = self._smart.generateSession(client_code, pin, totp_code)
 
             if not session.get("status"):
-                logger.error(f"AngelOne login failed: {session.get('message')}")
+                self._last_error = session.get("message") or "AngelOne rejected the login (no reason given)"
+                logger.error(f"AngelOne login failed: {self._last_error}")
                 self._connected = False
                 return False
 
             self._connected = True
             self._client_code = client_code
+            self._last_error = ""
             logger.info(f"AngelOne authenticated: {client_code}")
             return True
 
         except Exception as e:
+            # str(e) here is a network/library-level failure (timeout, DNS,
+            # malformed response), not an AngelOne rejection reason — still
+            # safe to show, it never includes the credentials passed in.
+            self._last_error = str(e)
             logger.error(f"AngelOne authentication failed: {e}")
             self._connected = False
             return False
+
+    @property
+    def last_error(self) -> str:
+        """AngelOne's own rejection reason from the most recent failed login attempt, if any."""
+        return self._last_error
 
     def disconnect(self):
         """Drop the current session — dashboard 'Disconnect' action."""

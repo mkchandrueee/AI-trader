@@ -3198,7 +3198,9 @@ def api_broker_angelone_connect():
     return jsonify({
         "connected": ok,
         "client_code": angelone_adapter.client_code if ok else None,
-        "error": None if ok else "Login failed — check client ID, PIN, and that the TOTP code hasn't expired",
+        # AngelOne's own rejection reason (e.g. "Invalid Password", "AB1050:
+        # Invalid Totp") — never a credential value, safe to send back.
+        "error": None if ok else angelone_adapter.last_error,
     })
 
 
