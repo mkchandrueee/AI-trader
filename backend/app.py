@@ -22,6 +22,12 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Must run before utils.logger is imported (it grabs a reference to
+# sys.stdout for its handler) — see utils/console.py for why.
+from utils.console import fix_windows_console_encoding
+fix_windows_console_encoding()
+
 from dotenv import load_dotenv
 load_dotenv()
 

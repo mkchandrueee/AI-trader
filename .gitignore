@@ -14,10 +14,12 @@ venv/
 # ML Models (binary, regeneratable)
 *.pkl
 models/saved/
+predictions/saved_models/
 
 # Market Data
 data/historical/
 data/jugaad_cache/
+predictions/data/
 
 # Logs and Results
 logs/

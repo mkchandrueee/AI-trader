@@ -96,7 +96,13 @@ def preprocess_nse_df(df: pd.DataFrame) -> pd.DataFrame:
     Steps: resolve+select columns -> numeric conversion -> parse/sort dates.
     """
     if df.empty:
-        raise ValueError("jugaad-data returned no rows for this symbol/date range.")
+        raise ValueError(
+            "No historical data returned for this symbol/date range — jugaad-data's "
+            "index endpoint may be down (see the KNOWN GAP note in data/jugaad_adapter.py's "
+            "fetch_index_history), and the AngelOne fallback either isn't configured "
+            "(set ANGEL_* in .env) or also failed. Individual stock symbols (e.g. RELIANCE) "
+            "don't depend on the index endpoint and should still work."
+        )
 
     df = select_and_rename_columns(df)
     df = convert_price_columns(df)

@@ -80,17 +80,37 @@ def fetch_stock_history(symbol: str, from_date: date, to_date: date, series: str
         logger.error("jugaad-data not installed. Run: pip install jugaad-data")
         return pd.DataFrame()
 
-    try:
-        df = stock_df(symbol=symbol, from_date=from_date, to_date=to_date, series=series)
-        df.columns = [c.strip().upper() for c in df.columns]
-        return df
-    except Exception as e:
-        logger.warning(f"jugaad-data stock history fetch failed for {symbol}: {e}")
-        return pd.DataFrame()
+    # jugaad-data's on-disk cache directory (~/AppData/Local/nsehistory-stock
+    # on Windows) throws WinError 183 ("cannot create a file that already
+    # exists") the very first time it's created on a machine — a race in the
+    # library's own os.makedirs() call, not anything wrong with the request.
+    # Every call after the first succeeds once the directory exists, so one
+    # retry clears it rather than failing the whole first run.
+    for attempt in range(2):
+        try:
+            df = stock_df(symbol=symbol, from_date=from_date, to_date=to_date, series=series)
+            df.columns = [c.strip().upper() for c in df.columns]
+            return df
+        except Exception as e:
+            if attempt == 0 and "WinError 183" in str(e):
+                logger.info(f"jugaad-data cache dir race for {symbol}, retrying once...")
+                continue
+            logger.warning(f"jugaad-data stock history fetch failed for {symbol}: {e}")
+            return pd.DataFrame()
+    return pd.DataFrame()
 
 
 def fetch_index_history(index_name: str, from_date: date, to_date: date) -> pd.DataFrame:
-    """Daily OHLC history for an NSE index (e.g. 'NIFTY 50', 'NIFTY BANK')."""
+    """
+    Daily OHLC history for an NSE index (e.g. 'NIFTY 50', 'NIFTY BANK').
+
+    KNOWN GAP: as of jugaad-data 0.33.1, the NSE endpoint this hits
+    (index_df / index_raw) returns a non-JSON response for at least some
+    indices/date ranges — an upstream library/NSE-side issue, not something
+    fixable from here. Returns empty on any failure; callers (see
+    predictions/utils/data_fetcher.py) fall back to AngelOne's own
+    historical candles for index symbols when this comes back empty.
+    """
     try:
         from jugaad_data.nse import index_df
     except ImportError:

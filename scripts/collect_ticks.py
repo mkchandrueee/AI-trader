@@ -34,6 +34,13 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Must run before utils.logger is imported — see utils/console.py. This
+# script is auto-spawned as its own subprocess by backend/app.py, so its
+# fix doesn't cover it; needs its own.
+from utils.console import fix_windows_console_encoding
+fix_windows_console_encoding()
+
 from dotenv import load_dotenv
 load_dotenv()
 

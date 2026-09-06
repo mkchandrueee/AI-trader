@@ -25,6 +25,10 @@ than migrated twice.
 
 import sys
 
+# Must run before utils.logger is imported — see utils/console.py.
+from utils.console import fix_windows_console_encoding
+fix_windows_console_encoding()
+
 from config.settings import SYMBOLS
 from utils.logger import get_logger
 
