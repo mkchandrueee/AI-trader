@@ -68,6 +68,21 @@ def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
     return None
 
 
+def _safe_float(val) -> float:
+    """
+    NSE bhavcopy files use '-' (and sometimes blank) as a not-traded/no-data
+    placeholder in OHLC columns — a plain float() on that raises ValueError
+    and, uncaught, took the whole scan down. Returns NaN for anything
+    unparseable; _score_row's NaN guard (`v == v`) already skips those rows.
+    """
+    if val is None or (isinstance(val, float) and val != val):  # NaN
+        return float("nan")
+    try:
+        return float(str(val).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return float("nan")
+
+
 def _score_row(symbol: str, kind: str, o: float, h: float, l: float, c: float, prev_close: float) -> Optional[ScanRow]:
     if not all(v == v and v > 0 for v in (o, h, l, c)):  # NaN/zero guard
         return None
@@ -104,8 +119,8 @@ def _score_equity_bhavcopy(df: pd.DataFrame) -> list[ScanRow]:
             continue
         row = _score_row(
             str(r[sym_col]).strip(), "stock",
-            float(r[o_col]), float(r[h_col]), float(r[l_col]), float(r[c_col]),
-            float(r[prev_col]) if prev_col else float("nan"),
+            _safe_float(r[o_col]), _safe_float(r[h_col]), _safe_float(r[l_col]), _safe_float(r[c_col]),
+            _safe_float(r[prev_col]) if prev_col else float("nan"),
         )
         if row:
             rows.append(row)
@@ -128,10 +143,10 @@ def _score_index_bhavcopy(df: pd.DataFrame) -> list[ScanRow]:
         raw_name = str(r[name_col]).strip()
         trading_symbol = INDEX_TRADING_SYMBOL.get(raw_name.lower())
         symbol = trading_symbol or raw_name
-        prev_close = float(r[prev_col]) if prev_col and pd.notna(r[prev_col]) else float(r[c_col]) - 0  # best effort
+        prev_close = _safe_float(r[prev_col]) if prev_col else _safe_float(r[c_col])  # best effort
         row = _score_row(
             symbol, "index",
-            float(r[o_col]), float(r[h_col]), float(r[l_col]), float(r[c_col]), prev_close,
+            _safe_float(r[o_col]), _safe_float(r[h_col]), _safe_float(r[l_col]), _safe_float(r[c_col]), prev_close,
         )
         if row:
             rows.append(row)
