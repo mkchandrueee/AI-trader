@@ -28,7 +28,9 @@ import pandas as pd
 from database.db import read_sql
 from features.indicators import compute_all_macro_indicators
 from strategy.signal_generator import generate_signals
-from strategy.regime_detector import RegimeDetector, get_strategies_for_regime
+from strategy.regime_detector import (
+    RegimeDetector, get_strategies_for_regime, get_daily_bias, daily_bias_adjustment,
+)
 from models.predict import Predictor
 from models.strategy_models import StrategyPredictor
 from backtest.option_resolver import (
@@ -854,6 +856,11 @@ def replay_day(
         except Exception:
             pass
 
+        # Daily bias — previous day's floor-pivot lean, resolved relative to
+        # this bar's own date so the backtest sees the correct historical
+        # lean rather than whatever was true when the backtest was run.
+        daily_bias = get_daily_bias("NIFTY-I", ref_date=pd.Timestamp(minute_ts).date())
+
         # ── 7. Generate signals ──────────────────────────────────────────
         signals = generate_signals(latest, "NIFTY-I")
         if not signals:
@@ -907,6 +914,7 @@ def replay_day(
             # CALLs in bearish regimes need extra conviction
             if sig.direction == "CALL" and regime == MarketRegime.TRENDING_BEAR:
                 regime_bonus -= 0.05
+            regime_bonus += daily_bias_adjustment(sig.direction, daily_bias)
 
             # 8f. Composite score (includes news sentiment boost)
             directional_prob = ml_prob if sig.direction == "CALL" else (1.0 - ml_prob)

@@ -20,6 +20,7 @@ For now this uses a rule-based detector. Once real data is available,
 it can be upgraded to an ML-based classifier (RandomForest / HMM).
 """
 
+from datetime import date as _date
 from enum import Enum
 from typing import Optional
 
@@ -184,3 +185,117 @@ REGIME_STRATEGIES = {
 def get_strategies_for_regime(regime: MarketRegime) -> list:
     """Return list of strategy names appropriate for the given regime."""
     return REGIME_STRATEGIES.get(regime, REGIME_STRATEGIES[MarketRegime.UNKNOWN])
+
+
+# ── Daily Bias (NextDay Direction Analyser pivots) ─────────────────────────────
+#
+# The intraday regime above answers "what is NIFTY-I doing right now, on 5m
+# candles". nextday_bias() (strategy/math_decision_strategy.py) answers a
+# slower, once-a-day question from classic floor pivots on the PREVIOUS
+# completed day's H/L/C: which side does the pivot math lean for the session
+# ahead. Wired in the same additive way regime_bonus already is — a signal
+# whose direction agrees with the prior day's lean gets a small bonus, one
+# that fights it gets a small penalty. Neither overrides the other; a signal
+# still needs everything else (ML prob, flow, technical strength) to clear
+# the score floor.
+
+DAILY_BIAS_BONUS = 0.03    # signal direction agrees with the prior day's pivot lean
+DAILY_BIAS_PENALTY = 0.03  # signal direction fights it
+
+_daily_bias_cache: dict = {}  # {(symbol, ref_date): bias_dict_or_None} — changes once/day
+
+
+def compute_daily_bias(prev_high: float, prev_low: float, prev_close: float,
+                        min_distance_pct: float = 0.0) -> Optional[dict]:
+    """
+    Thin wrapper around math_decision_strategy.nextday_bias(), returning a
+    JSON-serializable dict (or None if inputs are missing/invalid).
+    """
+    if not (prev_high and prev_low and prev_close):
+        return None
+    try:
+        from strategy.math_decision_strategy import nextday_bias
+        bias = nextday_bias(prev_high, prev_low, prev_close, min_distance_pct)
+    except Exception as e:
+        logger.debug(f"daily bias compute failed: {e}")
+        return None
+
+    return {
+        "direction": bias.direction, "entry": bias.entry, "stop": bias.stop,
+        "target1": bias.target1, "target2": bias.target2,
+        "risk": bias.risk, "reward": bias.reward,
+        "rr": bias.rr if bias.rr == bias.rr else None,  # NaN -> None for JSON
+    }
+
+
+def get_daily_bias(symbol: str = "NIFTY-I", ref_date: Optional[_date] = None) -> Optional[dict]:
+    """
+    The previous completed trading day's floor-pivot lean for `symbol`,
+    cached per (symbol, ref_date) — this only changes once a day, so callers
+    (the live scanner, the backtest replay loop) can call it every cycle
+    without hitting the DB every time.
+
+    `ref_date` is the day being scanned/replayed — the "previous day" is
+    resolved relative to it (today's date live, the current backtest bar's
+    date in a backtest), not `date.today()`, so backtests get the correct
+    historical lean rather than whatever happened to be true when the
+    backtest was run.
+
+    Returns None if there's no prior-day candle data yet (e.g. day one of
+    collection) or the DB is unavailable — callers should treat that as "no
+    adjustment", not an error.
+    """
+    ref_date = ref_date or _date.today()
+    cache_key = (symbol, ref_date)
+    if cache_key in _daily_bias_cache:
+        return _daily_bias_cache[cache_key]
+
+    bias = None
+    try:
+        from database.db import read_sql
+
+        prev_day_row = read_sql(
+            "SELECT DISTINCT timestamp::date as d FROM minute_candles "
+            "WHERE symbol = :sym AND timestamp::date < :ref "
+            "ORDER BY d DESC LIMIT 1",
+            {"sym": symbol, "ref": ref_date},
+        )
+        if not prev_day_row.empty:
+            prev_day = prev_day_row.iloc[0]["d"]
+            agg = read_sql(
+                "SELECT MAX(high) as h, MIN(low) as l FROM minute_candles "
+                "WHERE symbol = :sym AND timestamp::date = :d",
+                {"sym": symbol, "d": prev_day},
+            )
+            close_row = read_sql(
+                "SELECT close FROM minute_candles WHERE symbol = :sym "
+                "AND timestamp::date = :d ORDER BY timestamp DESC LIMIT 1",
+                {"sym": symbol, "d": prev_day},
+            )
+            if not agg.empty and not close_row.empty and agg.iloc[0]["h"] is not None:
+                bias = compute_daily_bias(
+                    float(agg.iloc[0]["h"]), float(agg.iloc[0]["l"]), float(close_row.iloc[0]["close"]),
+                )
+    except Exception as e:
+        logger.debug(f"daily bias fetch skipped: {e}")
+
+    _daily_bias_cache[cache_key] = bias
+    if len(_daily_bias_cache) > 8:  # keep the cache small, it's only ever a few days
+        oldest_key = min(_daily_bias_cache, key=lambda k: k[1])
+        _daily_bias_cache.pop(oldest_key, None)
+    return bias
+
+
+def daily_bias_adjustment(direction: str, daily_bias: Optional[dict]) -> float:
+    """
+    +DAILY_BIAS_BONUS if `direction` ("CALL"/"PUT") agrees with the prior
+    day's pivot lean, -DAILY_BIAS_PENALTY if it disagrees, 0.0 if there's no
+    clear lean (tie / too-close-to-pivot) or no bias was available at all.
+    """
+    if not daily_bias or not daily_bias.get("direction"):
+        return 0.0
+    bullish_call = direction == "CALL" and daily_bias["direction"] == "bullish"
+    bearish_put = direction == "PUT" and daily_bias["direction"] == "bearish"
+    if bullish_call or bearish_put:
+        return DAILY_BIAS_BONUS
+    return -DAILY_BIAS_PENALTY

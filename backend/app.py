@@ -33,7 +33,10 @@ from flask_cors import CORS
 from database.db import read_sql, get_engine
 from features.indicators import compute_all_macro_indicators
 from strategy.signal_generator import generate_signals
-from strategy.regime_detector import RegimeDetector, get_strategies_for_regime, MarketRegime
+from strategy.regime_detector import (
+    RegimeDetector, get_strategies_for_regime, MarketRegime,
+    get_daily_bias, daily_bias_adjustment,
+)
 from models.predict import Predictor
 from models.strategy_models import StrategyPredictor
 from backtest.option_resolver import get_nearest_expiry, get_days_to_expiry
@@ -58,6 +61,7 @@ state = {
     "last_scan": None,
     "last_price": 0,
     "regime": "UNKNOWN",
+    "daily_bias": None,
     "models_loaded": False,
     "strategy_models_loaded": [],
     "db_connected": False,
@@ -862,6 +866,10 @@ def scan_market():
         state["regime"] = regime.value
         regime_strategies = get_strategies_for_regime(regime)
 
+        # Daily bias — previous day's floor-pivot lean (see regime_detector.py)
+        daily_bias = get_daily_bias("NIFTY-I")
+        state["daily_bias"] = daily_bias
+
         # Signals
         signals = generate_signals(latest, "NIFTY-I")
         state["signals_checked"] += len(signals) if signals else 0
@@ -948,6 +956,7 @@ def scan_market():
                 flow_score = max(0.20, min(1.0, 0.50 + obv_contrib + mfi_contrib))
 
             regime_bonus = 0.05 if regime_strategies and sig.strategy in regime_strategies else 0.0
+            regime_bonus += daily_bias_adjustment(sig.direction, daily_bias)
             final_score = (
                 WEIGHT_ML_PROBABILITY * directional_prob
                 + WEIGHT_OPTIONS_FLOW * flow_score

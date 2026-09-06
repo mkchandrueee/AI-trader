@@ -239,6 +239,20 @@ export default function LivePage() {
               </p>
             </div>
             <div>
+              <p className="text-[9px] uppercase tracking-[1.5px] mb-1" style={{ color: '#5a6270' }}>
+                Daily Bias <span style={{ color: '#3d4450' }}>(prior-day pivot)</span>
+              </p>
+              {state?.daily_bias?.direction ? (
+                <p className="text-xl font-bold uppercase" style={{
+                  color: state.daily_bias.direction === "bullish" ? '#00e87b' : '#ff3e3e'
+                }}>
+                  {state.daily_bias.direction}
+                </p>
+              ) : (
+                <p className="text-xl font-bold" style={{ color: '#5a6270' }}>--</p>
+              )}
+            </div>
+            <div>
               <p className="text-[9px] uppercase tracking-[1.5px] mb-1" style={{ color: '#5a6270' }}>Session P&L</p>
               <p className="text-xl font-bold" style={{ color: totalPnl >= 0 ? '#00e87b' : '#ff3e3e' }}>
                 ₹{totalPnl.toLocaleString("en-IN")}

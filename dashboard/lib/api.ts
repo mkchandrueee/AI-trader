@@ -45,12 +45,24 @@ export async function postJSON<T>(path: string, body?: object): Promise<T> {
 
 export type RiskLevel = "low" | "medium" | "high";
 
+export interface DailyBias {
+  direction: "bullish" | "bearish" | null;
+  entry: number;
+  stop: number;
+  target1: number;
+  target2: number;
+  risk: number;
+  reward: number;
+  rr: number | null;
+}
+
 export interface LiveState {
   status: string;
   last_scan: string | null;
   last_price: number;
   spot_price?: number;
   regime: string;
+  daily_bias?: DailyBias | null;
   models_loaded: boolean;
   strategy_models_loaded: string[];
   db_connected: boolean;
