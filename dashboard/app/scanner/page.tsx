@@ -7,7 +7,7 @@ import { RefreshCw } from "lucide-react";
 
 interface ScanRow {
   symbol: string;
-  kind: "index" | "stock";
+  kind: "index" | "stock" | "option";
   open: number;
   high: number;
   low: number;
@@ -18,6 +18,12 @@ interface ScanRow {
   bullish: boolean;
   body_ratio: number;
   close_pos: number;
+  underlying?: string;
+  strike?: number;
+  option_type?: string;
+  expiry?: string;
+  oi?: number;
+  volume?: number;
 }
 
 interface ScanResponse {
@@ -38,11 +44,13 @@ const INDEX_LISTS = [
 ];
 
 export default function ScannerPage() {
-  const [universe, setUniverse] = useState<"all" | "indices" | "stocks">("all");
+  const [universe, setUniverse] = useState<"all" | "indices" | "stocks" | "options">("all");
   const [direction, setDirection] = useState<"all" | "bullish" | "bearish">("all");
   const [minConfidence, setMinConfidence] = useState(60);
   const [search, setSearch] = useState("");
   const [indexList, setIndexList] = useState("");
+  const [optionType, setOptionType] = useState<"" | "CE" | "PE">("");
+  const [nearestExpiryOnly, setNearestExpiryOnly] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ScanResponse | null>(null);
@@ -58,6 +66,8 @@ export default function ScannerPage() {
         search: overrides?.search ?? search,
         limit: "150",
         index_list: indexList,
+        option_type: optionType,
+        nearest_expiry_only: String(nearestExpiryOnly),
       });
       const data = await fetchJSON<ScanResponse>(`/api/scanner/scan?${params}`);
       if (data.error) throw new Error(data.error);
@@ -68,7 +78,7 @@ export default function ScannerPage() {
     } finally {
       setLoading(false);
     }
-  }, [universe, direction, minConfidence, search, indexList]);
+  }, [universe, direction, minConfidence, search, indexList, optionType, nearestExpiryOnly]);
 
   const jumpToIndex = (symbol: string) => {
     setUniverse("indices");
@@ -101,8 +111,29 @@ export default function ScannerPage() {
                 <option value="all">All</option>
                 <option value="indices">Indices only</option>
                 <option value="stocks">Stocks only</option>
+                <option value="options">Options (CE/PE strikes)</option>
               </select>
             </div>
+            {universe === "options" && (
+              <>
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: "#5a6270" }}>Option Type</label>
+                  <select value={optionType} onChange={(e) => setOptionType(e.target.value as typeof optionType)}
+                    className="px-3 py-[6px] text-[12px]" style={{ background: "#0e1117", border: "1px solid #252a33", color: "#c8cdd5" }}>
+                    <option value="">CE + PE</option>
+                    <option value="CE">CE only</option>
+                    <option value="PE">PE only</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-1.5 pb-[6px]">
+                  <input type="checkbox" id="nearest-expiry" checked={nearestExpiryOnly}
+                    onChange={(e) => setNearestExpiryOnly(e.target.checked)} />
+                  <label htmlFor="nearest-expiry" className="text-[10px]" style={{ color: "#5a6270" }}>
+                    Nearest expiry only
+                  </label>
+                </div>
+              </>
+            )}
             <div>
               <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: "#5a6270" }}>Direction</label>
               <select value={direction} onChange={(e) => setDirection(e.target.value as typeof direction)}
@@ -174,25 +205,45 @@ export default function ScannerPage() {
                   <table>
                     <thead>
                       <tr>
-                        {["Symbol", "Type", "Close", "Chg %", "Confidence", "Direction"].map((h) => (
-                          <th key={h}>{h}</th>
-                        ))}
+                        {(universe === "options"
+                          ? ["Underlying", "Strike", "Type", "Expiry", "Premium", "Chg %", "OI", "Volume", "Confidence", "Direction"]
+                          : ["Symbol", "Type", "Close", "Chg %", "Confidence", "Direction"]
+                        ).map((h) => <th key={h}>{h}</th>)}
                       </tr>
                     </thead>
                     <tbody>
                       {result.rows.map((r) => (
-                        <tr key={r.symbol}>
-                          <td style={{ fontWeight: 600 }}>{r.symbol}</td>
-                          <td className="uppercase" style={{ color: "#5a6270" }}>{r.kind}</td>
-                          <td>₹{r.close.toLocaleString("en-IN")}</td>
-                          <td style={{ color: r.change_pct >= 0 ? "#00e87b" : "#ff3e3e" }}>
-                            {r.change_pct >= 0 ? "+" : ""}{r.change_pct}%
-                          </td>
-                          <td style={{ fontWeight: 600 }}>{r.confidence}</td>
-                          <td style={{ color: r.bullish ? "#00e87b" : "#ff3e3e", fontWeight: 600 }}>
-                            {r.bullish ? "BULLISH" : "BEARISH"}
-                          </td>
-                        </tr>
+                        universe === "options" ? (
+                          <tr key={r.symbol}>
+                            <td style={{ fontWeight: 600 }}>{r.underlying}</td>
+                            <td>{r.strike?.toLocaleString("en-IN")}</td>
+                            <td style={{ color: r.option_type === "CE" ? "#00e87b" : "#ff3e3e", fontWeight: 600 }}>{r.option_type}</td>
+                            <td style={{ color: "#5a6270" }}>{r.expiry}</td>
+                            <td>₹{r.close.toLocaleString("en-IN")}</td>
+                            <td style={{ color: r.change_pct >= 0 ? "#00e87b" : "#ff3e3e" }}>
+                              {r.change_pct >= 0 ? "+" : ""}{r.change_pct}%
+                            </td>
+                            <td style={{ color: "#5a6270" }}>{r.oi?.toLocaleString("en-IN")}</td>
+                            <td style={{ color: "#5a6270" }}>{r.volume?.toLocaleString("en-IN")}</td>
+                            <td style={{ fontWeight: 600 }}>{r.confidence}</td>
+                            <td style={{ color: r.bullish ? "#00e87b" : "#ff3e3e", fontWeight: 600 }}>
+                              {r.bullish ? "BULLISH" : "BEARISH"}
+                            </td>
+                          </tr>
+                        ) : (
+                          <tr key={r.symbol}>
+                            <td style={{ fontWeight: 600 }}>{r.symbol}</td>
+                            <td className="uppercase" style={{ color: "#5a6270" }}>{r.kind}</td>
+                            <td>₹{r.close.toLocaleString("en-IN")}</td>
+                            <td style={{ color: r.change_pct >= 0 ? "#00e87b" : "#ff3e3e" }}>
+                              {r.change_pct >= 0 ? "+" : ""}{r.change_pct}%
+                            </td>
+                            <td style={{ fontWeight: 600 }}>{r.confidence}</td>
+                            <td style={{ color: r.bullish ? "#00e87b" : "#ff3e3e", fontWeight: 600 }}>
+                              {r.bullish ? "BULLISH" : "BEARISH"}
+                            </td>
+                          </tr>
+                        )
                       ))}
                     </tbody>
                   </table>

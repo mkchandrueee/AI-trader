@@ -107,7 +107,7 @@ def fetch_index_constituents(index_list: str) -> set[str]:
 @dataclass
 class ScanRow:
     symbol: str
-    kind: str  # "index" | "stock"
+    kind: str  # "index" | "stock" | "option"
     open: float
     high: float
     low: float
@@ -118,6 +118,13 @@ class ScanRow:
     bullish: bool
     body_ratio: float
     close_pos: float
+    # Options only (kind="option") — empty/zero for index and stock rows.
+    underlying: str = ""
+    strike: float = 0.0
+    option_type: str = ""   # "CE" | "PE"
+    expiry: str = ""        # YYYY-MM-DD
+    oi: int = 0
+    volume: int = 0
 
 
 def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
@@ -143,7 +150,7 @@ def _safe_float(val) -> float:
         return float("nan")
 
 
-def _score_row(symbol: str, kind: str, o: float, h: float, l: float, c: float, prev_close: float) -> Optional[ScanRow]:
+def _score_row(symbol: str, kind: str, o: float, h: float, l: float, c: float, prev_close: float, **extra) -> Optional[ScanRow]:
     if not all(v == v and v > 0 for v in (o, h, l, c)):  # NaN/zero guard
         return None
     stats = candle_stats(o, h, l, c)
@@ -155,6 +162,7 @@ def _score_row(symbol: str, kind: str, o: float, h: float, l: float, c: float, p
         symbol=symbol, kind=kind, open=o, high=h, low=l, close=c, prev_close=prev_close,
         change_pct=round(change_pct, 2), confidence=round(confidence, 1),
         bullish=stats.bullish, body_ratio=round(stats.body_ratio, 3), close_pos=round(stats.close_pos, 3),
+        **extra,
     )
 
 
@@ -213,14 +221,74 @@ def _score_index_bhavcopy(df: pd.DataFrame) -> list[ScanRow]:
     return rows
 
 
+def _score_fo_bhavcopy(
+    df: pd.DataFrame, option_type: str = "", nearest_expiry_only: bool = True,
+) -> list[ScanRow]:
+    """
+    Score option contracts from the F&O UDiFF bhavcopy — the reference
+    tool's "index options / stock options" universe. Each contract's own
+    premium candle goes through the exact same candle-quality formula as
+    everything else here; nothing option-specific is invented.
+
+    Defaults to the nearest expiry per underlying, since scoring every
+    listed expiry for every strike (tens of thousands of rows, most with a
+    single stale trade or none at all) isn't useful — this mirrors why
+    math_decision_strategy only ever looks at the current ATM contract.
+    """
+    tkr_col = _find_col(df, ["tckrsymb", "symbol"])
+    opt_col = _find_col(df, ["optntp", "option_type"])
+    strike_col = _find_col(df, ["strkpric", "strike_price", "strike"])
+    xpry_col = _find_col(df, ["xprydt", "expiry_dt", "expiry"])
+    o_col = _find_col(df, ["opnpric", "open_price", "open"])
+    h_col = _find_col(df, ["hghpric", "high_price", "high"])
+    l_col = _find_col(df, ["lwpric", "low_price", "low"])
+    c_col = _find_col(df, ["clspric", "close_price", "close"])
+    prev_col = _find_col(df, ["prvsclsgpric", "prev_close", "prevclose"])
+    oi_col = _find_col(df, ["opnintrst", "open_interest", "oi"])
+    vol_col = _find_col(df, ["ttltradgvol", "volume", "contracts"])
+    if not all([tkr_col, opt_col, strike_col, xpry_col, o_col, h_col, l_col, c_col]):
+        logger.warning(f"F&O bhavcopy missing expected columns: {list(df.columns)}")
+        return []
+
+    work = df[df[opt_col].isin(["CE", "PE"])].copy()  # drop futures rows (OptnTp is blank/NaN there)
+    if option_type in ("CE", "PE"):
+        work = work[work[opt_col] == option_type]
+
+    if nearest_expiry_only:
+        work["_xpry_parsed"] = pd.to_datetime(work[xpry_col], errors="coerce")
+        nearest = work.groupby(tkr_col)["_xpry_parsed"].transform("min")
+        work = work[work["_xpry_parsed"] == nearest]
+
+    rows = []
+    for _, r in work.iterrows():
+        underlying = str(r[tkr_col]).strip()
+        strike = _safe_float(r[strike_col])
+        opt_type = str(r[opt_col]).strip()
+        expiry = str(r[xpry_col]).strip()
+        symbol = f"{underlying} {strike:.0f}{opt_type} {expiry}"
+        row = _score_row(
+            symbol, "option",
+            _safe_float(r[o_col]), _safe_float(r[h_col]), _safe_float(r[l_col]), _safe_float(r[c_col]),
+            _safe_float(r[prev_col]) if prev_col else float("nan"),
+            underlying=underlying, strike=strike, option_type=opt_type, expiry=expiry,
+            oi=int(_safe_float(r[oi_col])) if oi_col and r[oi_col] == r[oi_col] else 0,
+            volume=int(_safe_float(r[vol_col])) if vol_col and r[vol_col] == r[vol_col] else 0,
+        )
+        if row:
+            rows.append(row)
+    return rows
+
+
 def scan_market(
     scan_date: Optional[date] = None,
-    universe: str = "all",          # "all" | "indices" | "stocks"
+    universe: str = "all",          # "all" | "indices" | "stocks" | "options"
     direction: str = "all",         # "all" | "bullish" | "bearish"
     min_confidence: float = 0.0,
     search: str = "",
     limit: int = 100,
     index_list: str = "",           # "" | "nifty50" | "nifty100" | "nifty200" | "nifty500"
+    option_type: str = "",          # "" | "CE" | "PE" — only used when universe="options"
+    nearest_expiry_only: bool = True,  # only used when universe="options"
 ) -> dict:
     """
     Score every row of the latest published EOD bhavcopy with the same
@@ -233,6 +301,13 @@ def scan_market(
     constituents (e.g. "nifty50" -> only NIFTY 50 members) — index rows
     (kind="index") are never affected by it, there's no equivalent concept
     for them.
+
+    `universe="options"` is a separate, explicit choice (not folded into
+    "all") — it scores every CE/PE contract's own premium candle instead of
+    the underlying's cash-market candle. Not bundled into the default scan
+    because the F&O bhavcopy is a much larger, differently-shaped fetch
+    (~32k rows across every underlying/strike/expiry) that most scans don't
+    need. Use `search` (e.g. "NIFTY") to narrow to one underlying's options.
     """
     from data.jugaad_adapter import fetch_bhavcopy, fetch_index_bhavcopy
 
@@ -243,12 +318,15 @@ def scan_market(
     for attempt in range(5):  # walk back up to 5 days to find a published session
         eq_df = fetch_bhavcopy(used_date, segment="EQ") if universe in ("all", "stocks") else pd.DataFrame()
         idx_df = fetch_index_bhavcopy(used_date) if universe in ("all", "indices") else pd.DataFrame()
+        fo_df = fetch_bhavcopy(used_date, segment="FO") if universe == "options" else pd.DataFrame()
 
-        if not eq_df.empty or not idx_df.empty:
+        if not eq_df.empty or not idx_df.empty or not fo_df.empty:
             if not eq_df.empty:
                 rows.extend(_score_equity_bhavcopy(eq_df))
             if not idx_df.empty:
                 rows.extend(_score_index_bhavcopy(idx_df))
+            if not fo_df.empty:
+                rows.extend(_score_fo_bhavcopy(fo_df, option_type=option_type, nearest_expiry_only=nearest_expiry_only))
             break
 
         used_date = used_date - timedelta(days=1)

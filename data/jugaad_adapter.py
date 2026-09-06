@@ -27,6 +27,28 @@ from utils.logger import get_logger
 logger = get_logger("jugaad_adapter")
 
 
+def _fetch_fo_bhavcopy_udiff(dt: date) -> pd.DataFrame:
+    """
+    jugaad-data's own bhavcopy_fo_raw() hits an old NSE zip endpoint that
+    404s (confirmed: BadZipFile, the "zip" is actually an HTML error page).
+    Unlike bhavcopy_raw() (equity), it was never updated with a UDIFF
+    fallback. This calls NSE's modern UDiFF daily-reports API directly —
+    the same one bhavcopy_raw() itself falls back to internally — which
+    works (verified: real strike/expiry/OHLC/OI data). Covers only the
+    current and previous trading day (NSE's own limit on this API); older
+    dates fall through to the caller's fallback.
+    """
+    import io
+    import zipfile
+    from jugaad_data.nse.archives import NSEDailyReports
+
+    content = NSEDailyReports().download_file("FO-UDIFF-BHAVCOPY-CSV", trading_date=dt, segment="FO")
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        fname = zf.namelist()[0]
+        with zf.open(fname) as f:
+            return f.read().decode("utf-8")
+
+
 def fetch_bhavcopy(dt: date, segment: str = "FO") -> pd.DataFrame:
     """
     Fetch EOD bhavcopy for a single date without writing a file to disk.
@@ -39,13 +61,30 @@ def fetch_bhavcopy(dt: date, segment: str = "FO") -> pd.DataFrame:
         logger.error("jugaad-data not installed. Run: pip install jugaad-data")
         return pd.DataFrame()
 
+    raw = None
+    if segment.upper() == "FO":
+        try:
+            raw = _fetch_fo_bhavcopy_udiff(dt)
+        except Exception as e:
+            logger.debug(f"F&O UDiFF fetch failed for {dt}, trying legacy endpoint: {e}")
+            try:
+                raw = bhavcopy_fo_raw(dt)
+            except Exception as e2:
+                logger.warning(f"jugaad-data bhavcopy fetch failed for {dt} (FO): {e2}")
+                return pd.DataFrame()
+    else:
+        try:
+            raw = bhavcopy_raw(dt)
+        except Exception as e:
+            logger.warning(f"jugaad-data bhavcopy fetch failed for {dt} ({segment}): {e}")
+            return pd.DataFrame()
+
     try:
-        raw = bhavcopy_fo_raw(dt) if segment.upper() == "FO" else bhavcopy_raw(dt)
         df = pd.read_csv(StringIO(raw))
         df.columns = [c.strip().lower() for c in df.columns]
         return df
     except Exception as e:
-        logger.warning(f"jugaad-data bhavcopy fetch failed for {dt} ({segment}): {e}")
+        logger.warning(f"Could not parse bhavcopy CSV for {dt} ({segment}): {e}")
         return pd.DataFrame()
 
 
