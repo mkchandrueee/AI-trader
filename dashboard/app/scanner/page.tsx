@@ -29,21 +29,35 @@ interface ScanResponse {
   error?: string;
 }
 
+const INDEX_LISTS = [
+  { value: "", label: "All stocks" },
+  { value: "nifty50", label: "NIFTY 50" },
+  { value: "nifty100", label: "NIFTY 100" },
+  { value: "nifty200", label: "NIFTY 200" },
+  { value: "nifty500", label: "NIFTY 500" },
+];
+
 export default function ScannerPage() {
   const [universe, setUniverse] = useState<"all" | "indices" | "stocks">("all");
   const [direction, setDirection] = useState<"all" | "bullish" | "bearish">("all");
   const [minConfidence, setMinConfidence] = useState(60);
   const [search, setSearch] = useState("");
+  const [indexList, setIndexList] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ScanResponse | null>(null);
 
-  const runScan = useCallback(async () => {
+  const runScan = useCallback(async (overrides?: { universe?: typeof universe; search?: string }) => {
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams({
-        universe, direction, min_confidence: String(minConfidence), search, limit: "150",
+        universe: overrides?.universe ?? universe,
+        direction,
+        min_confidence: String(minConfidence),
+        search: overrides?.search ?? search,
+        limit: "150",
+        index_list: indexList,
       });
       const data = await fetchJSON<ScanResponse>(`/api/scanner/scan?${params}`);
       if (data.error) throw new Error(data.error);
@@ -54,7 +68,13 @@ export default function ScannerPage() {
     } finally {
       setLoading(false);
     }
-  }, [universe, direction, minConfidence, search]);
+  }, [universe, direction, minConfidence, search, indexList]);
+
+  const jumpToIndex = (symbol: string) => {
+    setUniverse("indices");
+    setSearch(symbol);
+    runScan({ universe: "indices", search: symbol });
+  };
 
   return (
     <div className="flex min-h-screen">
@@ -93,6 +113,13 @@ export default function ScannerPage() {
               </select>
             </div>
             <div>
+              <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: "#5a6270" }}>Index List</label>
+              <select value={indexList} onChange={(e) => setIndexList(e.target.value)}
+                className="px-3 py-[6px] text-[12px]" style={{ background: "#0e1117", border: "1px solid #252a33", color: "#c8cdd5" }}>
+                {INDEX_LISTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+            <div>
               <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: "#5a6270" }}>Min Confidence</label>
               <input type="number" min={0} max={100} value={minConfidence}
                 onChange={(e) => setMinConfidence(Number(e.target.value))}
@@ -105,8 +132,25 @@ export default function ScannerPage() {
                 placeholder="Symbol contains…"
                 className="px-3 py-[6px] text-[12px] w-36" style={{ background: "#0e1117", border: "1px solid #252a33", color: "#c8cdd5" }} />
             </div>
-            <button onClick={runScan} disabled={loading} className="t-btn t-btn-green flex items-center gap-1.5 px-4 py-[6px] text-[11px] font-semibold uppercase tracking-wider disabled:opacity-50">
+            <button onClick={() => runScan()} disabled={loading} className="t-btn t-btn-green flex items-center gap-1.5 px-4 py-[6px] text-[11px] font-semibold uppercase tracking-wider disabled:opacity-50">
               <RefreshCw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> {loading ? "Scanning…" : "Scan"}
+            </button>
+          </div>
+
+          {/* Quick index jumps */}
+          <div className="flex items-center gap-2 mb-5">
+            <span className="text-[9px] uppercase tracking-wider" style={{ color: "#5a6270" }}>Quick jump:</span>
+            <button onClick={() => jumpToIndex("NIFTY")} disabled={loading}
+              className="px-3 py-[4px] text-[10px] font-semibold uppercase tracking-wider" style={{ background: "#181c24", border: "1px solid #252a33", color: "#c8cdd5" }}>
+              NIFTY
+            </button>
+            <button onClick={() => jumpToIndex("BANKNIFTY")} disabled={loading}
+              className="px-3 py-[4px] text-[10px] font-semibold uppercase tracking-wider" style={{ background: "#181c24", border: "1px solid #252a33", color: "#c8cdd5" }}>
+              BANKNIFTY
+            </button>
+            <button disabled title="No free BSE/SENSEX data source is wired up yet — jugaad-data only covers NSE."
+              className="px-3 py-[4px] text-[10px] font-semibold uppercase tracking-wider cursor-not-allowed" style={{ background: "#181c24", border: "1px solid #252a33", color: "#3d4450" }}>
+              SENSEX (unavailable)
             </button>
           </div>
 

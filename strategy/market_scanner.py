@@ -22,7 +22,7 @@ bhavcopy archive isn't.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -42,6 +42,66 @@ INDEX_TRADING_SYMBOL = {
     "nifty midcap select": "MIDCPNIFTY",
     "nifty next 50": "NIFTYNXT50",
 }
+
+# Free, public, no-auth NSE archive constituent lists — same endpoint the
+# Market Scanner reference tool uses for its NIFTY 50/100/200/500 filters
+# (see _vendor-src/Market_Scanner/netlify/functions/market.mjs STOCK_LISTS).
+# Not available via jugaad-data itself, so fetched directly here.
+NSE_ARCHIVES = "https://nsearchives.nseindia.com"
+INDEX_LISTS = {
+    "nifty50": ("ind_nifty50list", "NIFTY 50"),
+    "nifty100": ("ind_nifty100list", "NIFTY 100"),
+    "nifty200": ("ind_nifty200list", "NIFTY 200"),
+    "nifty500": ("ind_nifty500list", "NIFTY 500"),
+}
+
+# SENSEX/BSE: no free bhavcopy or constituent-list source is currently wired
+# into this project. jugaad-data's BSE module only exposes live quotes
+# (BSELive), not historical/EOD data, and BSE's own bhavcopy endpoints
+# aren't verified here — rather than guess at an unstable URL, this is
+# left as a known gap. NSE-listed BANKNIFTY does NOT have this problem —
+# it's already a normal row in the "indices" universe (see
+# INDEX_TRADING_SYMBOL above); use `search=BANKNIFTY` to find it directly.
+
+_constituents_cache: dict[str, tuple[datetime, set[str]]] = {}
+_CONSTITUENTS_TTL = timedelta(hours=20)  # these lists change rarely (quarterly rebalance)
+
+
+def fetch_index_constituents(index_list: str) -> set[str]:
+    """
+    Stock symbols currently in the given NSE index (nifty50/100/200/500),
+    cached for a day. Returns an empty set (not an error) on any failure —
+    scan_market() treats that as "don't filter" rather than "return nothing".
+    """
+    if index_list not in INDEX_LISTS:
+        return set()
+
+    cached = _constituents_cache.get(index_list)
+    if cached and datetime.now() - cached[0] < _CONSTITUENTS_TTL:
+        return cached[1]
+
+    file_key, _ = INDEX_LISTS[index_list]
+    try:
+        # A bare `requests.get` here reliably times out — NSE blocks
+        # requests without a browser-like User-Agent. Reuse jugaad-data's
+        # own session (same headers it already uses successfully against
+        # this exact host for bhavcopy) rather than duplicating that setup.
+        from jugaad_data.nse.archives import NSEArchives
+        session = NSEArchives().s
+        resp = session.get(f"{NSE_ARCHIVES}/content/indices/{file_key}.csv", timeout=15)
+        resp.raise_for_status()
+        from io import StringIO
+        df = pd.read_csv(StringIO(resp.text))
+        sym_col = _find_col(df, ["symbol"])
+        if not sym_col:
+            logger.warning(f"{file_key}.csv missing a Symbol column: {list(df.columns)}")
+            return set()
+        symbols = {str(s).strip().upper() for s in df[sym_col] if str(s).strip()}
+        _constituents_cache[index_list] = (datetime.now(), symbols)
+        return symbols
+    except Exception as e:
+        logger.warning(f"Failed to fetch {file_key}.csv: {e}")
+        return set()
 
 
 @dataclass
@@ -160,6 +220,7 @@ def scan_market(
     min_confidence: float = 0.0,
     search: str = "",
     limit: int = 100,
+    index_list: str = "",           # "" | "nifty50" | "nifty100" | "nifty200" | "nifty500"
 ) -> dict:
     """
     Score every row of the latest published EOD bhavcopy with the same
@@ -167,6 +228,11 @@ def scan_market(
     filter and rank. Falls back one trading day at a time if a bhavcopy
     isn't published yet for the requested date (weekends/holidays/today
     before EOD).
+
+    `index_list`, when set, restricts STOCK rows to that index's current
+    constituents (e.g. "nifty50" -> only NIFTY 50 members) — index rows
+    (kind="index") are never affected by it, there's no equivalent concept
+    for them.
     """
     from data.jugaad_adapter import fetch_bhavcopy, fetch_index_bhavcopy
 
@@ -190,6 +256,13 @@ def scan_market(
         return {"date": None, "rows": [], "total_before_filter": 0, "message": "No published bhavcopy found in the last 5 days."}
 
     total_before_filter = len(rows)
+
+    if index_list:
+        constituents = fetch_index_constituents(index_list)
+        if constituents:
+            rows = [r for r in rows if r.kind != "stock" or r.symbol.upper() in constituents]
+        else:
+            logger.warning(f"Could not fetch constituents for {index_list!r} — index_list filter not applied")
 
     if direction == "bullish":
         rows = [r for r in rows if r.bullish]

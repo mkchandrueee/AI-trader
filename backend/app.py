@@ -3336,9 +3336,11 @@ def api_predictions_regime():
 @app.route("/api/scanner/scan")
 def api_scanner_scan():
     """
-    GET /api/scanner/scan?universe=all&direction=all&min_confidence=0&search=&limit=100
+    GET /api/scanner/scan?universe=all&direction=all&min_confidence=0&search=&limit=100&index_list=
     Same candle-quality scoring as math_decision_engine's analyse_side,
     applied across the whole published EOD board. See strategy/market_scanner.py.
+    index_list: "" | nifty50 | nifty100 | nifty200 | nifty500 — restricts
+    stock rows to that index's current constituents (free NSE archive list).
     """
     try:
         from strategy.market_scanner import scan_market
@@ -3348,6 +3350,7 @@ def api_scanner_scan():
             min_confidence=float(request.args.get("min_confidence", 0)),
             search=request.args.get("search", ""),
             limit=int(request.args.get("limit", 100)),
+            index_list=request.args.get("index_list", ""),
         )
         return jsonify(result)
     except Exception as e:
