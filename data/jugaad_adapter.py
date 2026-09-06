@@ -49,6 +49,29 @@ def fetch_bhavcopy(dt: date, segment: str = "FO") -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def fetch_index_bhavcopy(dt: date) -> pd.DataFrame:
+    """
+    EOD bhavcopy for all published NSE indices (NIFTY 50, NIFTY BANK, sector
+    indices, ...) for a single date — the free, non-bot-protected source
+    the Market Scanner tab uses for a wide, ranked scan (as opposed to a
+    live intraday read, which NSE has largely locked down).
+    """
+    try:
+        from jugaad_data.nse import bhavcopy_index_raw
+    except ImportError:
+        logger.error("jugaad-data not installed. Run: pip install jugaad-data")
+        return pd.DataFrame()
+
+    try:
+        raw = bhavcopy_index_raw(dt)
+        df = pd.read_csv(StringIO(raw))
+        df.columns = [c.strip().lower() for c in df.columns]
+        return df
+    except Exception as e:
+        logger.warning(f"jugaad-data index bhavcopy fetch failed for {dt}: {e}")
+        return pd.DataFrame()
+
+
 def fetch_stock_history(symbol: str, from_date: date, to_date: date, series: str = "EQ") -> pd.DataFrame:
     """Daily OHLC history for an NSE equity symbol."""
     try:

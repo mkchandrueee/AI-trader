@@ -3244,6 +3244,31 @@ def api_predictions_regime():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Market Scanner API (free NSE EOD bhavcopy via jugaad-data) ──────────────
+
+
+@app.route("/api/scanner/scan")
+def api_scanner_scan():
+    """
+    GET /api/scanner/scan?universe=all&direction=all&min_confidence=0&search=&limit=100
+    Same candle-quality scoring as math_decision_engine's analyse_side,
+    applied across the whole published EOD board. See strategy/market_scanner.py.
+    """
+    try:
+        from strategy.market_scanner import scan_market
+        result = scan_market(
+            universe=request.args.get("universe", "all"),
+            direction=request.args.get("direction", "all"),
+            min_confidence=float(request.args.get("min_confidence", 0)),
+            search=request.args.get("search", ""),
+            limit=int(request.args.get("limit", 100)),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Market scan failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── News Brief API (free RSS: ET, LiveMint, RBI, SEBI, Google News) ─────────
 
 

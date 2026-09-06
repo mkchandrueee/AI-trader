@@ -29,6 +29,9 @@ ai-trader/
 │       ├── charts/          # Option chain + candle charts
 │       ├── backtest/        # Backtest runner + results
 │       ├── trades/          # Trade history
+│       ├── scanner/         # Market Scanner — candle-quality scan across the whole NSE board
+│       ├── predictions/     # AI Forecast — NSE-Neuron 5-day LSTM/BiLSTM/GRU/CNN-LSTM forecast
+│       ├── news/            # News Brief — free RSS + sentiment
 │       ├── ai/              # AI chat
 │       └── settings/        # Risk profile + config
 ├── scripts/
@@ -53,11 +56,18 @@ ai-trader/
 │   ├── jugaad_adapter.py       # Free EOD bhavcopy / stock / index history
 │   ├── news_sentiment.py       # RSS news fetch + sentiment scoring (free)
 │   └── tick_collector.py       # TickCollector (buffers 200 ticks → DB flush)
+├── predictions/             # Vendored NSE-Neuron (LSTM/BiLSTM/GRU/CNN-LSTM), jugaad-data-ified
+│   ├── forecast.py          # forecast_symbol() / forecast_all() / regime_analysis()
+│   ├── nn_config.py         # NSE-Neuron's own config (renamed to avoid colliding with config/)
+│   ├── models/               # The four regression models + their BUY/HOLD/SELL classifiers
+│   └── utils/                 # data_fetcher (jugaad-data), preprocessor, regime/pattern detection
 ├── features/
 │   ├── indicators.py        # compute_all_macro_indicators() — 58 features
 │   └── micro_features.py    # compute_micro_features() — 5 features
 ├── strategy/
-│   ├── signal_generator.py  # Generates BUY/SELL signals per strategy
+│   ├── signal_generator.py       # Generates BUY/SELL signals per strategy
+│   ├── math_decision_strategy.py # Deterministic ATM CE/PE candle-quality strategy (the "math strategy")
+│   ├── market_scanner.py         # Same candle-quality maths, applied across the whole NSE EOD board
 │   ├── trade_scorer.py      # Composite score = 0.5×ML + 0.3×flow + 0.2×tech
 │   ├── regime_detector.py   # TRENDING_BULL/BEAR/SIDEWAYS/HIGH_VOL/LOW_VOL
 │   └── options_flow_detector.py
@@ -305,6 +315,10 @@ GET  /api/options/ticks        → tick chart for a specific option symbol+date
 POST /api/backtest/run         → run backtest
 GET  /api/backtest/results     → saved backtest results
 GET  /api/backtest/progress    → backtest progress SSE
+GET  /api/scanner/scan         → candle-quality scan across the NSE EOD board (free bhavcopy)
+GET  /api/predictions/forecast → NSE-Neuron 5-day forecast (lstm|bilstm|gru|cnn_lstm|all)
+GET  /api/predictions/regime   → regime + candlestick patterns, no model training
+GET  /api/news/brief           → free RSS news + keyword sentiment
 ```
 
 ### Key State Variables (in-memory, resets on Flask restart)
