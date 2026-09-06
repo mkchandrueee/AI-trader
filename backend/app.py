@@ -3132,8 +3132,17 @@ def api_option_ticks():
 # ── Broker Execution API ────────────────────────────────────────────────────
 
 from broker.order_manager import OrderManager
+from broker.angelone_adapter import AngelOneAdapter
 
-order_manager = OrderManager()
+# A single AngelOneAdapter instance, always available to the Connect/status
+# routes below regardless of TRADE_MODE. In paper mode this exists purely so
+# the dashboard's Connect card can verify credentials work without needing
+# to flip into live trading first. In angelone mode it's the SAME instance
+# OrderManager executes orders through — connecting via the dashboard IS
+# connecting the live trading session, not a second independent one.
+angelone_adapter = AngelOneAdapter()
+_trade_mode = os.getenv("TRADE_MODE", "paper").lower()
+order_manager = OrderManager(adapter=angelone_adapter if _trade_mode == "angelone" else None)
 
 
 @app.route("/api/broker/status")
@@ -3156,16 +3165,14 @@ def api_broker_auth_status():
     TOTP secret, computed via pyotp — see OrderManager.connect(), used at
     Flask startup) or the manual dashboard Connect below. Either way, this
     just reports whether it produced a live session — there's no OAuth
-    redirect step like Zerodha had.
+    redirect step like Zerodha had. Reports on the shared `angelone_adapter`
+    regardless of TRADE_MODE, so this works even in paper mode.
     """
-    from broker.angelone_adapter import AngelOneAdapter
-    if isinstance(order_manager.adapter, AngelOneAdapter):
-        return jsonify({
-            "connected": order_manager.adapter.is_connected,
-            "broker": "AngelOne",
-            "client_code": order_manager.adapter.client_code if order_manager.adapter.is_connected else None,
-        })
-    return jsonify({"connected": False, "message": "Not using AngelOne adapter"})
+    return jsonify({
+        "connected": angelone_adapter.is_connected,
+        "broker": "AngelOne",
+        "client_code": angelone_adapter.client_code if angelone_adapter.is_connected else None,
+    })
 
 
 @app.route("/api/broker/angelone/connect", methods=["POST"])
@@ -3174,12 +3181,11 @@ def api_broker_angelone_connect():
     Manual Connect: client ID, PIN/password, and the current 6-digit TOTP
     code (read off the user's own authenticator app) are typed into the
     dashboard and sent straight here — this request never passes through
-    any chat session, and none of these values are logged.
+    any chat session, and none of these values are logged. Works
+    regardless of TRADE_MODE (see `angelone_adapter` above) — connecting
+    here in paper mode just verifies your credentials without placing you
+    in live trading.
     """
-    from broker.angelone_adapter import AngelOneAdapter
-    if not isinstance(order_manager.adapter, AngelOneAdapter):
-        return jsonify({"connected": False, "error": "Not using AngelOne adapter"}), 400
-
     body = request.get_json(force=True, silent=True) or {}
     client_code = str(body.get("client_code", "")).strip()
     pin = str(body.get("pin", "")).strip()
@@ -3188,10 +3194,10 @@ def api_broker_angelone_connect():
     if not (client_code and pin and totp):
         return jsonify({"connected": False, "error": "client_code, pin, and totp are all required"}), 400
 
-    ok = order_manager.adapter.connect_manual(client_code, pin, totp)
+    ok = angelone_adapter.connect_manual(client_code, pin, totp)
     return jsonify({
         "connected": ok,
-        "client_code": order_manager.adapter.client_code if ok else None,
+        "client_code": angelone_adapter.client_code if ok else None,
         "error": None if ok else "Login failed — check client ID, PIN, and that the TOTP code hasn't expired",
     })
 
@@ -3199,10 +3205,7 @@ def api_broker_angelone_connect():
 @app.route("/api/broker/angelone/disconnect", methods=["POST"])
 def api_broker_angelone_disconnect():
     """Drop the current AngelOne session — dashboard 'Disconnect' action."""
-    from broker.angelone_adapter import AngelOneAdapter
-    if not isinstance(order_manager.adapter, AngelOneAdapter):
-        return jsonify({"connected": False, "error": "Not using AngelOne adapter"}), 400
-    order_manager.adapter.disconnect()
+    angelone_adapter.disconnect()
     return jsonify({"connected": False})
 
 

@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Sidebar from "@/components/Sidebar";
 import RiskProfileCard from "@/components/RiskProfileCard";
-import { fetchJSON, postJSON, type RiskProfile } from "@/lib/api";
+import { fetchJSON, postJSON, API_BASE, type RiskProfile } from "@/lib/api";
 import { Play, Plug, PlugZap } from "lucide-react";
 
 type RiskLevel = "low" | "medium" | "high";
@@ -44,17 +44,23 @@ export default function SettingsPage() {
     setConnecting(true);
     setConnectError(null);
     try {
-      const res = await postJSON<{ connected: boolean; client_code: string | null; error: string | null }>(
-        "/api/broker/angelone/connect",
-        { client_code: clientCode, pin, totp }
-      );
+      // Raw fetch, not the postJSON helper: a 400 (e.g. bad credentials) is
+      // a normal response with a real error message in the body, not a
+      // connectivity failure — postJSON throws on any non-2xx, which would
+      // otherwise collapse both cases into the same generic message.
+      const r = await fetch(`${API_BASE}/api/broker/angelone/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_code: clientCode, pin, totp }),
+      });
+      const res: { connected: boolean; client_code: string | null; error: string | null } = await r.json();
       if (res.connected) {
         setBrokerStatus({ connected: true, broker: "AngelOne", client_code: res.client_code });
         // Clear credential fields from memory as soon as they're no longer needed.
         setPin("");
         setTotp("");
       } else {
-        setConnectError(res.error || "Connect failed");
+        setConnectError(res.error || `Connect failed (HTTP ${r.status})`);
       }
     } catch {
       setConnectError("Could not reach the backend — is backend/app.py running?");

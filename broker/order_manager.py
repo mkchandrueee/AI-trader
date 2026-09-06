@@ -72,16 +72,27 @@ class OrderManager:
       MAX_DAILY_LOSS       — max cumulative loss before auto-stop (default: -5000)
       MAX_CONCURRENT_POSITIONS — max open positions at once (default: 1)
       ORDER_CONFIRMATION   — "auto" (default) or "manual" (requires dashboard click)
+
+    `adapter`: inject an already-constructed adapter (e.g. a shared
+    AngelOneAdapter the dashboard's Connect UI also manages) instead of
+    letting OrderManager build its own from TRADE_MODE. Lets a single
+    AngelOne session serve both the Connect/status UI and live order
+    execution — connecting via the dashboard while still in paper mode is
+    then just "test the credentials work", and flipping TRADE_MODE to
+    angelone later reuses that same connected session rather than starting
+    a second, independent one.
     """
 
-    def __init__(self):
+    def __init__(self, adapter: Optional[BrokerAdapter] = None):
         self._mode = os.getenv("TRADE_MODE", "paper").lower()
         self._max_daily_loss = float(os.getenv("MAX_DAILY_LOSS", "-5000"))
         self._max_concurrent = int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))
         self._confirmation_mode = os.getenv("ORDER_CONFIRMATION", "auto").lower()
 
         # Initialize the appropriate adapter
-        if self._mode == "angelone":
+        if adapter is not None:
+            self._adapter: BrokerAdapter = adapter
+        elif self._mode == "angelone":
             self._adapter: BrokerAdapter = AngelOneAdapter()
         else:
             self._adapter: BrokerAdapter = PaperAdapter()
