@@ -53,18 +53,55 @@ def upsert_candles(df: pd.DataFrame, table: str = "minute_candles"):
 
 
 def init_db():
-    """Run the schema.sql to initialize all tables and hypertables."""
+    """
+    Run schema.sql to create all tables (and, if available, TimescaleDB
+    hypertables). Each statement runs in and commits its own transaction —
+    NOT one transaction for the whole file — because Postgres aborts an
+    entire transaction on the first error and refuses every statement after
+    it until a rollback. Doing this in one shared transaction (the previous
+    behaviour) meant a single failed statement silently discarded every
+    table this call was supposed to create, including ones that appeared to
+    run cleanly before it.
+
+    TimescaleDB is optional, not required: if the `timescaledb` extension
+    isn't installed on this Postgres server, `create_hypertable(...)` calls
+    fail and are skipped — the preceding `CREATE TABLE IF NOT EXISTS` for
+    that same table already succeeded as a plain table in its own
+    transaction, which is all this app actually needs to function.
+    """
     import os
     schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
     with open(schema_path, "r") as f:
         sql = f.read()
+
     with engine.connect() as conn:
+        try:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))
+            conn.commit()
+            logger.info("TimescaleDB extension enabled — tables below will be hypertables.")
+        except Exception:
+            conn.rollback()
+            logger.warning(
+                "TimescaleDB extension not available on this Postgres server — "
+                "continuing with plain tables (fully functional, just without "
+                "hypertable partitioning/compression)."
+            )
+
+        created, skipped = 0, 0
         for statement in sql.split(";"):
             stmt = statement.strip()
-            if stmt:
-                try:
-                    conn.execute(text(stmt))
-                except Exception as e:
-                    logger.warning(f"Schema statement skipped: {e}")
-        conn.commit()
-    logger.info("Database schema initialized.")
+            if not stmt:
+                continue
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+                created += 1
+            except Exception as e:
+                conn.rollback()  # clear the aborted-transaction state for the NEXT statement
+                skipped += 1
+                if "create_hypertable" in stmt.lower():
+                    logger.debug(f"Hypertable conversion skipped (TimescaleDB unavailable): {e}")
+                else:
+                    logger.warning(f"Schema statement failed (not a hypertable call — check this one): {e}")
+
+    logger.info(f"Database schema initialized: {created} statements applied, {skipped} skipped.")
