@@ -118,9 +118,11 @@ Required settings:
 # Database
 DATABASE_URL=postgresql://postgres:password@localhost:5432/trading_db
 
-# TrueData (get from https://www.truedata.in/)
-TRUEDATA_USERNAME=your_username
-TRUEDATA_PASSWORD=your_password
+# AngelOne SmartAPI (free — create an app at https://smartapi.angelbroking.com)
+ANGEL_CLIENT_CODE=your_client_code
+ANGEL_PASSWORD_OR_PIN=your_pin
+ANGEL_TOTP_SECRET=your_totp_secret
+ANGEL_API_KEY=your_api_key
 
 # Kite Connect (get from https://kite.trade/)
 KITE_API_KEY=your_api_key
@@ -227,7 +229,7 @@ Before going live with real money:
 - [ ] Test with mock data (`python main.py mock`)
 - [ ] Run backtests on historical data (`python main.py backtest`)
 - [ ] Verify database connection works
-- [ ] Confirm TrueData API is active
+- [ ] Confirm AngelOne SmartAPI credentials are set
 - [ ] Test Kite Connect API (place a test order)
 - [ ] Start with small capital (₹10,000-₹25,000)
 - [ ] Monitor first few trades manually
@@ -292,10 +294,10 @@ systemctl status postgresql  # Linux
 brew services restart postgresql
 ```
 
-### "TrueData authentication failed"
+### "AngelOne authentication failed"
 - Verify credentials in `.env`
 - Check if subscription is active
-- Test login at https://www.truedata.in/
+- Run scripts/angelone_check_auth.py to test login
 
 ### "Kite access token expired"
 - Kite tokens expire daily

@@ -37,7 +37,7 @@ This is a **complete algorithmic trading research platform** that covers the ful
 
 | Layer | Capability |
 |---|---|
-| **Data** | Live tick collection via TrueData WebSocket + REST backfill into TimescaleDB |
+| **Data** | Live tick collection via AngelOne WebSocket + REST backfill (free) + jugaad-data EOD (free) into TimescaleDB |
 | **Backtest** | Tick-level replay engine — same pipeline as live, on real historical tick data |
 | **Feature Engineering** | 80 macro indicators + 5 micro tick features computed per bar |
 | **ML Models** | XGBoost macro/micro/per-strategy models + Q-learning RL exit agent |
@@ -100,7 +100,7 @@ This is a **complete algorithmic trading research platform** that covers the ful
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  DATA COLLECTION (scripts/collect_ticks.py)                            │
-│  TrueData WebSocket → TickCollector → TimescaleDB                      │
+│  AngelOne WebSocket → TickCollector → TimescaleDB                      │
 │  · NIFTY-I futures (continuous) ticks                                  │
 │  · ATM ±3 strikes × CE+PE = 14 option contracts                        │
 │  · Dynamic re-subscription if NIFTY drifts 100+ pts from ATM           │
@@ -232,7 +232,7 @@ This is a **complete algorithmic trading research platform** that covers the ful
 | **Database** | TimescaleDB (PostgreSQL 17) | Hypertables for tick/candle time-series |
 | **ML Models** | XGBoost 2.x + Q-learning | Binary classifiers + tabular RL agent |
 | **Feature Pipeline** | scikit-learn + pandas | 80 macro + 5 micro features |
-| **Data Feed** | TrueData REST + WebSocket | `wss://push.truedata.in:8084` |
+| **Data Feed** | AngelOne SmartAPI (REST + WebSocket) | `wss://smartapisocket.angelone.in/smart-stream` |
 | **ORM** | SQLAlchemy (read_sql/write_df) | Never raw psycopg2 |
 
 ---
@@ -246,7 +246,7 @@ This is a **complete algorithmic trading research platform** that covers the ful
 | Python | 3.13+ | Backend + ML pipeline |
 | Node.js | 18+ | Next.js dashboard |
 | PostgreSQL | 17 | With TimescaleDB extension |
-| TrueData API | — | Live + historical market data |
+| AngelOne SmartAPI | — | Live + historical market data (free) |
 
 ### 1. Clone & Python environment
 
@@ -287,14 +287,16 @@ DB_NAME=trading
 DB_USER=postgres
 DB_PASSWORD=postgres
 
-# TrueData (required for live data)
-TRUEDATA_USER=your_username
-TRUEDATA_PASSWORD=your_password
+# AngelOne SmartAPI (required for live data) — free, no separate subscription
+ANGEL_CLIENT_CODE=your_client_code
+ANGEL_PASSWORD_OR_PIN=your_pin
+ANGEL_TOTP_SECRET=your_totp_secret
+ANGEL_API_KEY=your_api_key
 
 # Trading parameters (optional overrides)
 INITIAL_CAPITAL=50000
 ATM_RANGE=3              # strikes ±N from ATM (default 3 → 14 option contracts)
-MAX_SYMBOLS=50           # TrueData plan max
+MAX_SYMBOLS=50           # AngelOne plan max
 SCORE_THRESHOLD=0.6      # minimum composite score to suggest a trade
 LOG_LEVEL=INFO
 MODEL_DIR=models/saved
@@ -316,7 +318,7 @@ npm install
 
 Click the button above to create a Diploi deployment from this repository.
 
-> **Note:** A successful deployment can show the basic dashboard UI, but live futures and options data requires paid market-data vendor credentials such as TrueData. Without those credentials, data-driven views and trading features will be limited.
+> **Note:** A successful deployment can show the basic dashboard UI, but live futures and options data requires free AngelOne SmartAPI credentials. Without those credentials, data-driven views and trading features will be limited.
 
 The included `diploi.yaml` provisions:
 
@@ -327,8 +329,10 @@ The included `diploi.yaml` provisions:
 After the deployment is created, open the Diploi dashboard and add the required backend environment variables under the Flask component:
 
 ```env
-TRUEDATA_USER=your_username
-TRUEDATA_PASSWORD=your_password
+ANGEL_CLIENT_CODE=your_client_code
+ANGEL_PASSWORD_OR_PIN=your_pin
+ANGEL_TOTP_SECRET=your_totp_secret
+ANGEL_API_KEY=your_api_key
 INITIAL_CAPITAL=50000
 SCORE_THRESHOLD=0.6
 LOG_LEVEL=INFO
@@ -618,7 +622,7 @@ All timestamps stored as `TIMESTAMPTZ` (UTC). Displayed as IST (+5:30) in fronte
 | `tick_data` | Hypertable | `timestamp, symbol, price, volume, oi, bid_price, ask_price` | ~8K ticks/day/symbol |
 | `minute_candles` | Hypertable | `timestamp, symbol, open, high, low, close, volume, vwap, oi` | Primary ML training source |
 | `option_chain` | Hypertable | `timestamp, symbol, strike, option_type, ltp, oi, iv, delta` | Snapshots |
-| `symbol_master` | Regular | `symbol, expiry, strike, option_type, lot_size` | TrueData F&O universe |
+| `symbol_master` | Regular | `symbol, expiry, strike, option_type, lot_size` | F&O universe (AngelOne instrument master) |
 | `trade_log` | Regular | `entry_time, exit_time, symbol, side, entry_price, pnl, ml_score` | Paper trade history |
 | `features_macro` | Regular | 17 feature columns | Computed features |
 | `features_micro` | Regular | 5 feature columns | Tick-level features |
@@ -651,12 +655,16 @@ All served on `http://localhost:5050`:
 
 ---
 
-## TrueData Integration
+## AngelOne + jugaad-data Integration
+
+Free — AngelOne SmartAPI requires only a trading account, no separate
+market-data subscription; jugaad-data needs no auth at all.
 
 ### Symbol Naming
 
 ```
-NIFTY-I              → NIFTY continuous futures (historical + live ticks)
+NIFTY-I              → stable internal alias (DB/dashboard/ML pipeline), resolved
+                        to AngelOne's real current-month contract at the adapter layer
 NIFTY 50             → NIFTY spot index (WebSocket only)
 NIFTY{YYMMDD}{STRIKE}{CE|PE}  → Options e.g. NIFTY26040122400PE
 ```
@@ -666,12 +674,10 @@ NIFTY{YYMMDD}{STRIKE}{CE|PE}  → Options e.g. NIFTY26040122400PE
 ### WebSocket Flow
 
 ```
-Connect → wss://push.truedata.in:8084?user=X&password=Y
-Auth response → { "success": true, "maxsymbols": 50 }
-Subscribe → { "method": "addsymbol", "symbols": [...] }
-Snapshot → { "symbollist": [[symbol, symbolID, ts, LTP, ...], ...] }  (18 fields)
-Live tick → { "trade": [symbolID, ts, LTP, LTQ, ATP, OI, ...] }       (no symbol name!)
-                ↑ symbolID is mapped to name via _symbol_id_map built during subscribe
+Connect → SmartWebSocketV2(jwtToken, apiKey, clientCode, feedToken)
+Subscribe → .subscribe("ai-trader", 3, [{"exchangeType": 2, "tokens": [...]}])   (mode 3 = SNAP_QUOTE)
+Live tick → on_data callback: { token, last_traded_price (paise), best_5_buy_data, best_5_sell_data, ... }
+                ↑ token is mapped to the internal symbol alias via _subscribed_tokens built during subscribe
 ```
 
 ---
@@ -687,6 +693,9 @@ ai-trader/
 │   ├── app/charts/          # Candle charts, option chain viewer
 │   ├── app/backtest/        # Backtest runner + results viewer
 │   ├── app/trades/          # Trade history with P&L analytics
+│   ├── app/scanner/         # Market Scanner: candle-quality scan across the NSE board
+│   ├── app/predictions/     # AI Forecast: NSE-Neuron 5-day LSTM/BiLSTM/GRU/CNN-LSTM
+│   ├── app/news/            # News Brief: free RSS + sentiment
 │   └── app/settings/        # Risk profile selector
 │
 ├── scripts/
@@ -715,7 +724,9 @@ ai-trader/
 │   └── micro_features.py    # compute_micro_features() — 5 features
 │
 ├── strategy/
-│   ├── signal_generator.py  # 3 rule-based strategies → Signal objects
+│   ├── signal_generator.py       # 4 strategies → Signal objects (3 rule-based + 1 formula-based)
+│   ├── math_decision_strategy.py # Deterministic ATM CE/PE candle-quality strategy
+│   ├── market_scanner.py         # Same candle-quality maths across the whole NSE board
 │   ├── trade_scorer.py      # Composite score = ML + flow + technical
 │   ├── regime_detector.py   # EMA/ATR-based regime classification
 │   └── options_flow_detector.py  # PCR, OI flow analysis
@@ -725,8 +736,16 @@ ai-trader/
 │   └── risk_profiles.py     # LOW / MEDIUM / HIGH RiskProfile dataclasses
 │
 ├── data/
-│   ├── truedata_adapter.py  # TrueData REST + WebSocket client
-│   └── tick_collector.py    # TickCollector (buffers 200 ticks → DB flush)
+│   ├── market_data_adapter.py  # AngelOne (live+historical) + jugaad-data (EOD) client
+│   ├── angelone_symbols.py     # Instrument master → symboltoken resolution
+│   ├── jugaad_adapter.py       # Free EOD bhavcopy / stock / index history
+│   ├── news_sentiment.py       # RSS news + sentiment scoring (free)
+│   └── tick_collector.py       # TickCollector (buffers 200 ticks → DB flush)
+│
+├── predictions/             # Vendored NSE-Neuron forecasting, jugaad-data-ified
+│   ├── forecast.py          # forecast_symbol() / forecast_all() / regime_analysis()
+│   ├── models/               # LSTM/BiLSTM/GRU/CNN-LSTM + BUY/HOLD/SELL classifiers
+│   └── utils/                 # jugaad-data fetcher, preprocessor, regime/pattern detection
 │
 ├── backtest/
 │   ├── backtest_engine.py   # Simple candle-level backtest
@@ -743,9 +762,9 @@ ai-trader/
 
 1. **Slippage**: Modeled as half-spread on entry (ask) and exit (bid) plus flat ₹40 commission per trade. Real options slippage can still be higher for illiquid strikes; actual live P&L may come in 5-10% below backtest
 2. **Bid-ask spread**: System now uses real bid on exit and real ask on entry via tick_data when available. Older days without tick data fall back to close + half-spread estimate
-3. **Data gaps**: If TrueData WebSocket drops, tick gaps are auto-filled within 60s via REST `getticks` by `_backfill_ticks_if_stale()`. Candle gaps handled the same way by `_backfill_candles_if_stale()`. Only the last 5 days of ticks can be refilled; earlier gaps are permanent
+3. **Data gaps**: AngelOne's free tier has no historical tick-level API at all (unlike TrueData's old 5-day rolling window), so tick gaps can no longer be backfilled once missed — `_backfill_ticks_if_stale()` is dormant, see `data/market_data_adapter.py`'s documented gap. Candle gaps are still backfilled via `_backfill_candles_if_stale()`, since AngelOne's minute-candle history is available
 4. **Model drift**: XGBoost trained on ~7-month rolling history. During regime changes (budget, elections, global risk-off), accuracy degrades. EOD auto-retrain mitigates this but cannot fully adapt to unprecedented conditions
-5. **Expiry day behavior**: On Tuesdays (expiry day), extreme theta decay and gamma spikes are only partially represented in training data. Holiday-shifted expiries (like Apr 13 2026) are handled via live TrueData REST expiry lookup
+5. **Expiry day behavior**: On Tuesdays (expiry day), extreme theta decay and gamma spikes are only partially represented in training data. Holiday-shifted expiries (like Apr 13 2026) are handled via AngelOne's instrument master, refreshed daily
 6. **Outcome model sample size**: Only ~60 unique backtest trades so far → outcome models have AUC ≈ 0.50-0.80 depending on strategy. More backtests needed before they add meaningful per-trade discrimination
 7. **Lot sizing**: Explicit score-tiered sizing (1 lot < 0.70 / 2 lots 0.70-0.80 / 3 lots ≥0.80) replaces the old Kelly formula which always resolved to 2 lots regardless of conviction
 8. **Minute-bar resolution for old days**: Before 2026-03-25, only minute candles were collected for options. Backtests on these days fall back to minute-bar exit approximation; tick-mode is only available for days where we have option tick data

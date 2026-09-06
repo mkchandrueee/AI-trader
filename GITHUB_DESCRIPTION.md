@@ -155,7 +155,7 @@ The system combines:
 🧠 Dual-model ML architecture (macro + microstructure)
 📊 Institutional options flow analysis
 🎯 Market regime detection
-⚡ Automated execution via Zerodha Kite
+⚡ Automated execution via AngelOne SmartAPI (free)
 
 Built entirely in Python with TimescaleDB for time-series data and XGBoost 
 for predictions. The system processes tick-level and minute-level data to 
@@ -193,7 +193,7 @@ and decided to open-source it. Here's what it does:
 - Python 3.13
 - TimescaleDB for time-series data
 - XGBoost for ML
-- TrueData API for market data
+- AngelOne SmartAPI + jugaad-data for market data (free)
 - Kite Connect for execution
 
 **Risk Management:**
@@ -221,7 +221,7 @@ Consider adding this to your README:
 ```markdown
 ## ❓ Frequently Asked Questions
 
-**Q: Can I use this with other brokers besides Zerodha?**
+**Q: Can I use this with other brokers besides AngelOne?**
 A: The broker adapter is modular. You can implement adapters for other brokers 
 by extending the `BrokerAdapter` class.
 
