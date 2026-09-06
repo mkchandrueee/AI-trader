@@ -1,0 +1,35 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ML Models (binary, regeneratable)
+*.pkl
+models/saved/
+
+# Market Data
+data/historical/
+data/jugaad_cache/
+
+# Logs and Results
+logs/
+backtest_results/
+
+# OS
+.DS_Store
+
+# Reference-only source (original zips + the Market_Scanner tree being
+# ported from) — not part of the shipped project, kept locally for lookup.
+_vendor-src/
+
+# Node
+node_modules/
+dashboard/.next/

@@ -1,0 +1,34 @@
+# Core
+pandas>=2.0
+numpy>=1.24
+python-dotenv>=1.0
+
+# Database
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+
+# ML
+scikit-learn>=1.3
+xgboost>=2.0
+lightgbm>=4.0
+joblib>=1.3
+
+# Technical Analysis
+pandas-ta>=0.3.14
+
+# Broker / Data (free — AngelOne SmartAPI + jugaad-data, replacing
+# Kite Connect + TrueData)
+smartapi-python>=1.5
+pyotp>=2.9
+jugaad-data>=0.28
+websocket-client>=1.6
+requests>=2.31
+feedparser>=6.0
+
+# News / Sentiment
+beautifulsoup4>=4.12
+python-dateutil>=2.8
+torch>=2.0
+
+# Logging / Utils
+colorama>=0.4

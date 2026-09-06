@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Frontend (Next.js)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000,
+      "cwd": "dashboard"
+    },
+    {
+      "name": "Backend (Flask)",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["frontend/app.py"],
+      "port": 5050
+    }
+  ]
+}
