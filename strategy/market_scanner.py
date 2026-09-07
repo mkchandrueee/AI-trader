@@ -2,16 +2,38 @@
 Market Scanner — ported from the NIFTY Option Strategy Suite's Market Scanner tab
 ────────────────────────────────────────────────────────────────────────────────
 The reference tool's own description of this tab (scanner.js) is the design
-spec here too: "every underlying row goes through analyseSide, exactly as
-the Candle Quality Scan does... nothing here invents a formula, re-weights a
-score, or moves a threshold. What it adds is breadth and filters."
+spec here too: "every underlying row goes through APP.swing.readCandle,
+exactly as the Candle Quality Scan does, which is APP.analyser.analyseSide
+PLUS ITS MIRROR... nothing here invents a formula, re-weights a score, or
+moves a threshold. What it adds is breadth and filters."
+
+That "plus its mirror" is load-bearing and was missed in an earlier version
+of this port: an underlying (index/stock) candle has no CE/PE counterpart
+to compare against the way an option pair does, so scanner.js's swing.js
+reads the SAME candle two ways — once with analyseSide's own bullish-only
+formula (confidence = 20*bullish + 40*bodyRatio + 40*closePos), and once
+with its bearish mirror (confidence = 20*bearish + 40*bodyRatio +
+40*(1-closePos)) — and keeps whichever side scores higher. Without the
+mirror, a textbook bearish marubozu (opened at the high, closed at the
+low, all body) scores a middling ~40 under the bullish-only formula
+instead of the 100 it deserves as a short setup — confirmed live against
+the reference tool: BAJAJHLDNG's 2026-09-07 candle (O=H=11200, L=C=10956)
+read 100% SHORT there and 40% here before this fix. _score_row below now
+does both readings for stock/index rows (see analyse_underlying) and picks
+the higher-scoring side, exactly like readCandle. Option rows are
+unaffected — an option's own premium candle already has a real opposite
+number (the other leg, CE vs PE), so mirroring one candle in isolation
+isn't the reference's model there; analyse_side's bullish-only reading
+applied directly to that contract's own candle is correct as-is, matching
+how the Trade Decision Engine already scores CE/PE.
 
 So this reuses the exact same candle-quality scoring already ported in
 strategy/math_decision_strategy.py (analyse_side — entry/targets/stop/risk
 AND confidence come from that one call, not a separate inline formula),
 applied across a wide symbol universe instead of a single ATM CE/PE pair —
 the INPUT is different (whole-market EOD bhavcopy vs. two option-premium
-candles), the SCORING MATH is identical.
+candles), the SCORING MATH is identical (for options; underlyings get the
+long-vs-short mirror above).
 
 Also ports scanner.js's own filter/breadth feature set, not just its core
 formula: sector filter, F&O-tradable-only index filter, sort by
@@ -37,7 +59,9 @@ from typing import Optional
 
 import pandas as pd
 
-from strategy.math_decision_strategy import analyse_side, analyse_option_pair, DEFAULT_CFG
+from strategy.math_decision_strategy import (
+    analyse_side, analyse_option_pair, candle_stats, DEFAULT_CFG, LegAnalysis, _clamp, _round2,
+)
 from utils.logger import get_logger
 
 logger = get_logger("market_scanner")
@@ -205,16 +229,63 @@ def _safe_float(val) -> float:
         return float("nan")
 
 
+def _mirror_side(o: float, h: float, l: float, c: float, cfg: dict) -> "LegAnalysis":
+    """
+    swing.js's shortRead: the SAME three-term formula as analyse_side, read
+    backwards — entry below close, targets below entry, stop above the
+    high, confidence rewarding a bearish/full-body/low-close candle instead
+    of a bullish/full-body/high-close one. Only exists for underlying
+    (index/stock) rows, which have no CE/PE counterpart to compare against
+    the way an option pair does — see the module docstring.
+    """
+    stats = candle_stats(o, h, l, c)
+    rng = stats.range
+    entry_pct = cfg.get("entryPremiumPct", 0.5)
+    step_mult = cfg.get("targetStepMult", 0.8)
+    min_step = cfg.get("minTargetStep", 16)
+    t2_mult = cfg.get("t2Mult", 2.0)
+    t3_mult = cfg.get("t3Mult", 3.5)
+    sl_mult = cfg.get("slRangeMult", 0.3)
+
+    entry = _round2(c * (1 - entry_pct / 100))
+    step = max(step_mult * rng, min_step)
+    target1 = _round2(entry - step)
+    target2 = _round2(entry - t2_mult * step)
+    target3 = _round2(entry - t3_mult * step)
+    stop_loss = _round2(h + sl_mult * rng)
+
+    confidence = _clamp(
+        20 * (0 if stats.bullish else 1) + 40 * stats.body_ratio + 40 * (1 - stats.close_pos), 0, 100,
+    )
+
+    return LegAnalysis(
+        stats=stats, entry=entry, target1=target1, target2=target2, target3=target3,
+        stop_loss=stop_loss, risk=stop_loss - entry, confidence=confidence,
+    )
+
+
 def _score_row(symbol: str, kind: str, o: float, h: float, l: float, c: float, prev_close: float, **extra) -> Optional[ScanRow]:
     if not all(v == v and v > 0 for v in (o, h, l, c)):  # NaN/zero guard
         return None
-    leg = analyse_side(o, h, l, c, DEFAULT_CFG)
+
+    long_leg = analyse_side(o, h, l, c, DEFAULT_CFG)
+    if kind == "option":
+        # No mirror here — an option's own premium candle already has a
+        # real opposite number (the other leg), so analyse_side's
+        # bullish-only reading applied to that contract's own candle is
+        # correct as-is (see module docstring).
+        leg, is_long = long_leg, True
+    else:
+        short_leg = _mirror_side(o, h, l, c, DEFAULT_CFG)
+        is_long = long_leg.confidence >= short_leg.confidence
+        leg = long_leg if is_long else short_leg
+
     change_pct = ((c - prev_close) / prev_close * 100) if prev_close and prev_close == prev_close else 0.0
     rr = round(abs(leg.target2 - leg.entry) / leg.risk, 2) if leg.risk > 0 else None
     return ScanRow(
         symbol=symbol, kind=kind, open=o, high=h, low=l, close=c, prev_close=prev_close,
         change_pct=round(change_pct, 2), confidence=round(leg.confidence, 1),
-        bullish=leg.stats.bullish, body_ratio=round(leg.stats.body_ratio, 3), close_pos=round(leg.stats.close_pos, 3),
+        bullish=is_long, body_ratio=round(leg.stats.body_ratio, 3), close_pos=round(leg.stats.close_pos, 3),
         entry=leg.entry, target1=leg.target1, target2=leg.target2, target3=leg.target3,
         stop_loss=leg.stop_loss, risk=round(leg.risk, 2), rr=rr,
         **extra,
@@ -222,18 +293,29 @@ def _score_row(symbol: str, kind: str, o: float, h: float, l: float, c: float, p
 
 
 def _score_equity_bhavcopy(df: pd.DataFrame) -> list[ScanRow]:
-    sym_col = _find_col(df, ["symbol"])
-    series_col = _find_col(df, ["series"])
-    # jugaad-data's current (UDIFF) bhavcopy format uses open_price/high_price/
-    # low_price/close_price, not the classic openprice-style names — accept both
-    # since NSE has changed this format before and may again.
-    o_col = _find_col(df, ["open_price", "openprice", "open"])
-    h_col = _find_col(df, ["high_price", "highprice", "high"])
-    l_col = _find_col(df, ["low_price", "lowprice", "low"])
-    c_col = _find_col(df, ["close_price", "closeprice", "close"])
-    prev_col = _find_col(df, ["prev_close", "prevclose", "prev. close"])
+    sym_col = _find_col(df, ["symbol", "tckrsymb"])
+    series_col = _find_col(df, ["series", "sctysrs"])
+    # NSE has since moved the CM (equity) bhavcopy to the same abbreviated
+    # UDiFF column layout F&O already used (tckrsymb/sctysrs/opnpric/
+    # hghpric/lwpric/clspric/prvsclsgpric) — confirmed live 2026-09-07:
+    # the openprice-style names below stopped matching anything, so every
+    # stock row silently dropped out and universe="all"/"stocks" scans
+    # returned indices only. Accept both layouts since NSE has changed
+    # this format before and may again.
+    o_col = _find_col(df, ["open_price", "openprice", "opnpric", "open"])
+    h_col = _find_col(df, ["high_price", "highprice", "hghpric", "high"])
+    l_col = _find_col(df, ["low_price", "lowprice", "lwpric", "low"])
+    c_col = _find_col(df, ["close_price", "closeprice", "clspric", "close"])
+    prev_col = _find_col(df, ["prev_close", "prevclose", "prvsclsgpric", "prev. close"])
     turnover_col = _find_col(df, ["turnover_lacs", "turnover"])
+    # The UDiFF layout has no turnover-in-lacs column at all; ttltrfval
+    # (total traded value) is the closest equivalent but in raw rupees, so
+    # it's scaled to lacs below to keep the same unit the field always had.
+    turnover_raw_col = None if turnover_col else _find_col(df, ["ttltrfval"])
     deliv_col = _find_col(df, ["deliv_per", "delivery_pct", "%dly qt to traded qty"])
+    # UDiFF also dropped delivery % entirely — no replacement column exists
+    # in this bhavcopy, so it stays 0 for every row (see ScanRow default)
+    # until NSE publishes it again or a separate free source is found.
     if not all([sym_col, o_col, h_col, l_col, c_col]):
         logger.warning(f"Equity bhavcopy missing expected columns: {list(df.columns)}")
         return []
@@ -242,11 +324,16 @@ def _score_equity_bhavcopy(df: pd.DataFrame) -> list[ScanRow]:
     for _, r in df.iterrows():
         if series_col and str(r[series_col]).strip() != "EQ":
             continue
+        turnover = (
+            _safe_float(r[turnover_col]) if turnover_col
+            else _safe_float(r[turnover_raw_col]) / 100_000 if turnover_raw_col
+            else 0.0
+        )
         row = _score_row(
             str(r[sym_col]).strip(), "stock",
             _safe_float(r[o_col]), _safe_float(r[h_col]), _safe_float(r[l_col]), _safe_float(r[c_col]),
             _safe_float(r[prev_col]) if prev_col else float("nan"),
-            turnover=_safe_float(r[turnover_col]) if turnover_col else 0.0,
+            turnover=turnover,
             delivery_pct=_safe_float(r[deliv_col]) if deliv_col else 0.0,
         )
         if row:
