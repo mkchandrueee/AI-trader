@@ -53,6 +53,12 @@ SELECT create_hypertable('tick_data', 'timestamp', if_not_exists => TRUE);
 
 CREATE INDEX IF NOT EXISTS idx_tick_symbol_ts ON tick_data (symbol, timestamp DESC);
 
+-- Required by scripts/backfill_ticks.py's ON CONFLICT (timestamp, symbol)
+-- DO NOTHING — without a matching unique index/constraint, Postgres refuses
+-- that clause outright ("no unique or exclusion constraint matching the ON
+-- CONFLICT specification"), which is what happened before this was added.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tick_data_ts_symbol ON tick_data (timestamp, symbol);
+
 -- ── Second Candles (aggregated from ticks) ───────────────────────────────────
 CREATE TABLE IF NOT EXISTS second_candles (
     timestamp   TIMESTAMPTZ     NOT NULL,
@@ -84,6 +90,13 @@ CREATE TABLE IF NOT EXISTS minute_candles (
 SELECT create_hypertable('minute_candles', 'timestamp', if_not_exists => TRUE);
 
 CREATE INDEX IF NOT EXISTS idx_minute_symbol_ts ON minute_candles (symbol, timestamp DESC);
+
+-- Required by database.db.upsert_candles()'s ON CONFLICT (timestamp, symbol)
+-- DO NOTHING — without a matching unique index/constraint, Postgres refuses
+-- that clause outright ("no unique or exclusion constraint matching the ON
+-- CONFLICT specification"). This table never had one, so every upsert_candles()
+-- call has always failed on this (non-TimescaleDB) install.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_minute_candles_ts_symbol ON minute_candles (timestamp, symbol);
 
 -- ── 5-Minute Candles (regime detection timeframe) ────────────────────────────
 CREATE TABLE IF NOT EXISTS five_minute_candles (

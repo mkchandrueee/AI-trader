@@ -31,6 +31,7 @@ falling back to minute candles (see `scripts/tick_replay_backtest.py`).
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -51,6 +52,14 @@ from data.angelone_symbols import resolver as symbol_resolver
 from utils.logger import get_logger
 
 logger = get_logger("market_data")
+
+# DB-internal option symbol alias (see CLAUDE.md's "Symbol Naming" section
+# and backtest/option_resolver.py::build_option_symbol): "NIFTY{yymmdd}{strike}{CE|PE}"
+# e.g. "NIFTY26090823900CE". NOT a real AngelOne tradingsymbol — AngelOne's
+# actual format is "NIFTY{DD}{MMM}{YY}{strike}{CE|PE}" (e.g.
+# "NIFTY08SEP2623900CE"). _resolve() below translates this alias the same
+# way it already translates "NIFTY-I" to a real futures contract.
+_OPTION_ALIAS_RE = re.compile(r"^([A-Z]+)(\d{6})(\d+)(CE|PE)$")
 
 _INTERVAL_MAP = {
     "1min": "ONE_MINUTE",
@@ -137,11 +146,25 @@ class MarketDataAdapter:
         """
         Resolve a symbol to its AngelOne instrument row.
 
-        The whole DB schema / dashboard / ML pipeline is keyed on the old
-        TrueData-style synthetic continuous-futures symbol ("NIFTY-I",
-        "BANKNIFTY-I", "FINNIFTY-I") — rather than touch 50+ call sites, that
-        alias (and the bare underlying name) resolves here to AngelOne's
-        actual current front-month futures contract.
+        The whole DB schema / dashboard / ML pipeline is keyed on two
+        synthetic aliases rather than AngelOne's own tradingsymbol strings —
+        rather than touch 50+ call sites, both resolve here:
+
+          - "NIFTY-I" / "BANKNIFTY-I" / "FINNIFTY-I" (continuous-futures
+            alias) -> AngelOne's actual current front-month futures contract.
+          - "NIFTY{yymmdd}{strike}{CE|PE}" (DB-internal option alias, see
+            _OPTION_ALIAS_RE above) -> AngelOne's actual option tradingsymbol
+            via the instrument master's structured fields (name/expiry/
+            strike/instrumenttype), since guessing AngelOne's real string
+            format ("NIFTY08SEP2623900CE") is unreliable — confirmed by
+            querying the live instrument master directly: the yymmdd-style
+            alias never matches a real row, which silently broke every live
+            caller of an option symbol (websocket subscribe in
+            collect_ticks.py, and REST backfill here) until this fix.
+
+        Callers keep writing/reading DB rows under the alias — only the
+        AngelOne API calls (getCandleData, websocket subscribe) need the
+        real symbol/token, resolved transparently here.
         """
         row = symbol_resolver.token_for(symbol, exchange)
         if row:
@@ -149,6 +172,15 @@ class MarketDataAdapter:
         underlying = symbol[:-2] if symbol.endswith("-I") else symbol
         if exchange == "NFO" and underlying in ("NIFTY", "BANKNIFTY", "FINNIFTY"):
             return symbol_resolver.current_futures_symbol(underlying)
+        if exchange == "NFO":
+            m = _OPTION_ALIAS_RE.match(symbol)
+            if m:
+                opt_underlying, exp_code, strike_str, opt_type = m.groups()
+                try:
+                    expiry = datetime.strptime(exp_code, "%y%m%d").date()
+                except ValueError:
+                    return None
+                return symbol_resolver.option_symbol_for(opt_underlying, expiry, float(strike_str), opt_type)
         return None
 
     # ── Historical: Candles ───────────────────────────────────────────────────
