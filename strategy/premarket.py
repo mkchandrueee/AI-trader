@@ -52,9 +52,20 @@ def _fetch_with_fallback(fetch_fn, start_date: date, max_days: int = 7) -> tuple
 
 def _previous_session_ohlc(symbol: str = "NIFTY") -> tuple[Optional[dict], Optional[date]]:
     """
-    High/Low/Close of the last completed session strictly before today —
-    what the NextDay Direction Analyser reads before the bell. Sourced from
-    the free NSE index EOD bhavcopy (same source as market_scanner.py).
+    High/Low/Close of the last COMPLETED session — what the NextDay
+    Direction Analyser reads to call tomorrow's lean. Sourced from the free
+    NSE index EOD bhavcopy (same source as market_scanner.py).
+
+    Walk-back starts at TODAY, not yesterday: NSE only publishes a day's
+    bhavcopy after that session closes, so a same-day request before
+    publish correctly comes back empty and falls through to the prior day —
+    there's no risk of reading an incomplete, still-forming session. Read
+    in the evening (after today's close and NSE's publish), today itself
+    IS the last completed session and must be used, not skipped — a fixed
+    "start at yesterday" previously always excluded it, so a reading taken
+    after the close was silently stale by a full session (confirmed against
+    the reference tool: 2026-09-07 22:01 IST correctly read TODAY's own
+    H 23890 / L 23737.9 / C 23779.15, this code was returning Sep 4's).
     """
     from data.jugaad_adapter import fetch_index_bhavcopy
     from strategy.market_scanner import INDEX_TRADING_SYMBOL, _find_col, _safe_float
@@ -82,7 +93,7 @@ def _previous_session_ohlc(symbol: str = "NIFTY") -> tuple[Optional[dict], Optio
             return None
         return {"high": h, "low": l, "close": c}
 
-    return _fetch_with_fallback(_fetch_one, date.today() - timedelta(days=1))
+    return _fetch_with_fallback(_fetch_one, date.today())
 
 
 def nextday_reading(symbol: str = "NIFTY") -> dict:
