@@ -98,13 +98,52 @@ INDEX_LISTS = {
 # showing no sector).
 DEFAULT_SECTOR_SOURCE = "nifty500"
 
-# SENSEX/BSE: no free bhavcopy or constituent-list source is currently wired
-# into this project. jugaad-data's BSE module only exposes live quotes
-# (BSELive), not historical/EOD data, and BSE's own bhavcopy endpoints
-# aren't verified here — rather than guess at an unstable URL, this is
-# left as a known gap. NSE-listed BANKNIFTY does NOT have this problem —
-# it's already a normal row in the "indices" universe (see
-# INDEX_TRADING_SYMBOL above); use `search=BANKNIFTY` to find it directly.
+# SENSEX/BSE: jugaad-data has no free BSE bhavcopy (BSELive only exposes
+# live quotes, not historical/EOD), so it can't join the bulk NSE-bhavcopy
+# path every other index/stock row comes from. AngelOne's own instrument
+# master DOES carry it, though — a real index token on exchange "BSE"
+# (symbol "SENSEX") with real listed options on exchange "BFO" — so its
+# daily candle is fetched directly via MarketDataAdapter and added to the
+# board as a single extra row, same shape as everything else. This needs
+# an authenticated AngelOne session (unlike the rest of the scan, which is
+# free/no-auth NSE bhavcopy); if that's unavailable, SENSEX is silently
+# skipped rather than failing the whole scan — see _fetch_sensex_row.
+#
+# Not extended to option legs / a stock constituent list: BSE has no free
+# equity bhavcopy either, so there's no way to build a "SENSEX 50"-style
+# constituent scan the same way NIFTY 50/100/200/500 work, and SENSEX's
+# own ATM-strike resolution on BFO (different strike gaps, different
+# expiry calendar) is a separate piece of work left for later.
+_SENSEX_FETCH_DAYS_BACK = 7  # walk back this many calendar days for weekends/holidays
+
+
+def _fetch_sensex_row(scan_date: date) -> Optional["ScanRow"]:
+    from data.market_data_adapter import MarketDataAdapter
+
+    adapter = MarketDataAdapter()
+    if not adapter.authenticate():
+        logger.info("SENSEX row skipped — AngelOne not connected (free NSE data doesn't need this, BSE has no free bhavcopy).")
+        return None
+
+    end = datetime.combine(scan_date, datetime.min.time()) + timedelta(days=1)
+    start = end - timedelta(days=_SENSEX_FETCH_DAYS_BACK + 1)
+    try:
+        df = adapter.fetch_historical_bars("SENSEX", start, end, "eod", exchange="BSE")
+    except Exception as e:
+        logger.warning(f"SENSEX fetch failed: {e}")
+        return None
+    if df.empty:
+        return None
+
+    df = df.sort_values("timestamp")
+    last = df.iloc[-1]
+    prev_close = float(df.iloc[-2]["close"]) if len(df) >= 2 else float("nan")
+    row = _score_row(
+        "SENSEX", "index",
+        _safe_float(last["open"]), _safe_float(last["high"]), _safe_float(last["low"]), _safe_float(last["close"]),
+        prev_close, tradable_fno=True,
+    )
+    return row
 
 _index_list_cache: dict[str, tuple[datetime, pd.DataFrame]] = {}
 _CONSTITUENTS_TTL = timedelta(hours=20)  # these lists change rarely (quarterly rebalance)
@@ -560,14 +599,17 @@ def scan_market(
     idx_df, idx_date = _fetch_with_fallback(fetch_index_bhavcopy) if universe in ("all", "indices") else (pd.DataFrame(), None)
     need_fo = universe == "options" or include_option_legs
     fo_df, fo_date = _fetch_with_fallback(lambda d: fetch_bhavcopy(d, segment="FO")) if need_fo else (pd.DataFrame(), None)
+    sensex_row = _fetch_sensex_row(scan_date) if universe in ("all", "indices") else None
 
-    if eq_df.empty and idx_df.empty and fo_df.empty:
+    if eq_df.empty and idx_df.empty and fo_df.empty and sensex_row is None:
         return {"date": None, "rows": [], "total_before_filter": 0, "message": "No published bhavcopy found in the last 5 days."}
 
     if not eq_df.empty:
         rows.extend(_score_equity_bhavcopy(eq_df))
     if not idx_df.empty:
         rows.extend(_score_index_bhavcopy(idx_df))
+    if sensex_row is not None:
+        rows.append(sensex_row)
     if universe == "options" and not fo_df.empty:
         rows.extend(_score_fo_bhavcopy(fo_df, option_type=option_type, nearest_expiry_only=nearest_expiry_only))
     if include_option_legs:
@@ -575,8 +617,10 @@ def scan_market(
 
     # idx_date is the most trustworthy "actual session" indicator (index
     # bhavcopy reliably errors on non-trading days; equity's does not — see
-    # above), so prefer it for the date reported back to the caller.
-    used_date = idx_date or eq_date or fo_date
+    # above), so prefer it for the date reported back to the caller. Falls
+    # back to scan_date itself in the (rare) case only SENSEX came back —
+    # AngelOne's own candle fetch doesn't hand back which date it landed on.
+    used_date = idx_date or eq_date or fo_date or (scan_date if sensex_row is not None else None)
 
     total_before_filter = len(rows)
     counts = {"published": total_before_filter}

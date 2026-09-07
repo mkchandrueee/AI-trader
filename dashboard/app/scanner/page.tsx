@@ -255,9 +255,9 @@ export default function ScannerPage() {
               className="px-3 py-[4px] text-[10px] font-semibold uppercase tracking-wider" style={{ background: "#181c24", border: "1px solid #252a33", color: "#c8cdd5" }}>
               BANKNIFTY
             </button>
-            <button disabled title="No free BSE/SENSEX data source is wired up yet — jugaad-data only covers NSE."
-              className="px-3 py-[4px] text-[10px] font-semibold uppercase tracking-wider cursor-not-allowed" style={{ background: "#181c24", border: "1px solid #252a33", color: "#3d4450" }}>
-              SENSEX (unavailable)
+            <button onClick={() => jumpToIndex("SENSEX")} disabled={loading}
+              className="px-3 py-[4px] text-[10px] font-semibold uppercase tracking-wider" style={{ background: "#181c24", border: "1px solid #252a33", color: "#c8cdd5" }}>
+              SENSEX
             </button>
           </div>
 
