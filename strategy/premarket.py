@@ -151,38 +151,66 @@ def _resolve_atm_symbols(symbol: str, spot: float) -> Optional[dict]:
     }
 
 
-def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str) -> Optional[dict]:
+def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, session_date: Optional[date] = None) -> Optional[dict]:
     """
-    One OHLC candle for `opt_symbol`: the fixed 09:15-09:20 opening candle
-    (mode="opening", always 5-minute), or the latest *fully closed*
-    `timeframe` candle (mode="latest") — a candle still forming is never
-    returned, matching the reference tool's own rule (see math_decision_strategy).
+    One OHLC candle for `opt_symbol` on `session_date` (default today): the
+    fixed 09:15-09:20 opening candle (mode="opening", always 5-minute), or
+    the latest *fully closed* `timeframe` candle (mode="latest") — a candle
+    still forming is never returned, matching the reference tool's own rule
+    (see math_decision_strategy). For a past session_date the whole day has
+    already closed, so "latest" simply means that day's last candle, with
+    no now-based cutoff.
     """
     now = datetime.now()
-    today = now.date()
+    session_date = session_date or now.date()
+    is_today = session_date == now.date()
 
     if mode == "opening":
-        start = datetime.combine(today, datetime.strptime(OPENING_WINDOW[0], "%H:%M").time())
-        end = datetime.combine(today, datetime.strptime(OPENING_WINDOW[1], "%H:%M").time())
+        start = datetime.combine(session_date, datetime.strptime(OPENING_WINDOW[0], "%H:%M").time())
+        end = datetime.combine(session_date, datetime.strptime(OPENING_WINDOW[1], "%H:%M").time())
         df = adapter.fetch_historical_bars(opt_symbol, start, end, "5min", exchange="NFO")
         if df.empty:
             return None
         row = df.iloc[0]
     else:
         tf_minutes = TIMEFRAME_MINUTES.get(timeframe, 5)
-        market_open = datetime.combine(today, datetime.strptime("09:15", "%H:%M").time())
-        df = adapter.fetch_historical_bars(opt_symbol, market_open, now, timeframe, exchange="NFO")
+        market_open = datetime.combine(session_date, datetime.strptime("09:15", "%H:%M").time())
+        market_close = datetime.combine(session_date, datetime.strptime("15:30", "%H:%M").time())
+        end_bound = now if is_today else market_close
+        df = adapter.fetch_historical_bars(opt_symbol, market_open, end_bound, timeframe, exchange="NFO")
         if df.empty:
             return None
-        df = df[df["timestamp"] + timedelta(minutes=tf_minutes) <= now]
-        if df.empty:
-            return None  # only the still-forming candle exists so far
+        if is_today:
+            df = df[df["timestamp"] + timedelta(minutes=tf_minutes) <= now]
+            if df.empty:
+                return None  # only the still-forming candle exists so far
         row = df.iloc[-1]
 
     return {
         "timestamp": row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else str(row["timestamp"]),
         "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]), "close": float(row["close"]),
     }
+
+
+def _fetch_option_candle_with_fallback(
+    adapter, opt_symbol: str, timeframe: str, mode: str, max_days: int = 7,
+) -> tuple[Optional[dict], Optional[date], bool]:
+    """
+    Try today's session first; if the market is closed today (weekend,
+    holiday, or simply before/just after the requested window has printed),
+    walk back to the last session that has this candle. Returns
+    (candle, session_date, is_live) — is_live is True only when the candle
+    actually came from today's session.
+    """
+    d = date.today()
+    for i in range(max_days):
+        if i > 0:
+            time.sleep(0.35)  # AngelOne historical REST: ~3 req/sec, same spacing as market_data_adapter.py
+        candle = _fetch_option_candle(adapter, opt_symbol, timeframe, mode, session_date=d)
+        if candle is not None:
+            return candle, d, d == date.today()
+        d = d - timedelta(days=1)
+    return None, None, False
 
 
 def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str = "latest") -> dict:
@@ -212,11 +240,18 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     if resolved is None:
         return {"error": f"Could not resolve this week's ATM option contracts for {symbol}."}
 
-    ce_candle = _fetch_option_candle(adapter, resolved["ce_symbol"], timeframe, mode)
-    pe_candle = _fetch_option_candle(adapter, resolved["pe_symbol"], timeframe, mode)
+    ce_candle, ce_date, ce_live = _fetch_option_candle_with_fallback(adapter, resolved["ce_symbol"], timeframe, mode)
+    pe_candle, pe_date, pe_live = _fetch_option_candle_with_fallback(adapter, resolved["pe_symbol"], timeframe, mode)
     if ce_candle is None or pe_candle is None:
         window = "09:15-09:20" if mode == "opening" else f"latest closed {timeframe}"
-        return {"error": f"No {window} candle available yet for {resolved['ce_symbol']}/{resolved['pe_symbol']}."}
+        return {"error": f"No {window} candle available for {resolved['ce_symbol']}/{resolved['pe_symbol']} in the last 7 sessions."}
+
+    # CE and PE fall back independently (see _fetch_option_candle_with_fallback);
+    # in practice they land on the same session, but if they ever disagree,
+    # the pair is only genuinely live when BOTH legs are today's session —
+    # a mixed pair is reported as the earlier (non-live) of the two dates.
+    is_live = ce_live and pe_live
+    candle_session_date = min(ce_date, pe_date) if not is_live else ce_date
 
     decision = analyse_option_pair(
         (ce_candle["open"], ce_candle["high"], ce_candle["low"], ce_candle["close"]),
@@ -230,8 +265,11 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     agrees_with_opening = None
     opening_side = None
     if mode != "opening":
-        opening_ce = _fetch_option_candle(adapter, resolved["ce_symbol"], "5min", "opening")
-        opening_pe = _fetch_option_candle(adapter, resolved["pe_symbol"], "5min", "opening")
+        # Compare against the SAME session's opening candle — if the live
+        # fetch above fell back to a previous day, the opening reading must
+        # come from that same day, not today's (possibly nonexistent) open.
+        opening_ce = _fetch_option_candle(adapter, resolved["ce_symbol"], "5min", "opening", session_date=candle_session_date)
+        opening_pe = _fetch_option_candle(adapter, resolved["pe_symbol"], "5min", "opening", session_date=candle_session_date)
         if opening_ce and opening_pe:
             opening_decision = analyse_option_pair(
                 (opening_ce["open"], opening_ce["high"], opening_ce["low"], opening_ce["close"]),
@@ -243,6 +281,7 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
 
     return {
         "symbol": symbol, "timeframe": timeframe, "mode": mode,
+        "session_date": candle_session_date.isoformat(), "is_live": is_live,
         "spot": spot, "atm": resolved["atm"], "expiry": resolved["expiry"].isoformat(),
         "ce_symbol": resolved["ce_symbol"], "pe_symbol": resolved["pe_symbol"],
         "ce_candle": ce_candle, "pe_candle": pe_candle,

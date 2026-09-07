@@ -26,6 +26,8 @@ interface LiveConfirmation {
   symbol: string;
   timeframe: string;
   mode: "opening" | "latest";
+  session_date: string;
+  is_live: boolean;
   spot: number;
   atm: number;
   expiry: string;
@@ -229,7 +231,22 @@ export default function PreMarketPage() {
             {liveError && <p className="text-[11px] mb-3" style={{ color: "#ff3e3e" }}>ERROR: {liveError}</p>}
 
             {live && (
-              <div className="pt-3" style={{ borderTop: "1px solid #252a33" }}>
+              <div className="pt-3" style={{ borderTop: `1px solid ${live.is_live ? "#252a33" : "#e8c30055"}` }}>
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <span className="px-2 py-[3px] text-[9px] font-bold uppercase tracking-wider"
+                    style={{
+                      background: live.is_live ? "#00e87b22" : "#e8c30022",
+                      border: `1px solid ${live.is_live ? "#00e87b" : "#e8c300"}`,
+                      color: live.is_live ? "#00e87b" : "#e8c300",
+                    }}>
+                    {live.is_live ? "● LIVE" : `○ PREVIOUS SESSION — ${live.session_date}`}
+                  </span>
+                  {!live.is_live && (
+                    <span className="text-[9px]" style={{ color: "#e8c300" }}>
+                      Market is closed — showing the last session's data, not a live read.
+                    </span>
+                  )}
+                </div>
                 <div className="flex flex-wrap items-center gap-2 mb-3">
                   <span className="px-3 py-1 text-[13px] font-bold uppercase tracking-wider"
                     style={{ background: "#181c24", border: `1px solid ${sideColor(live.side)}`, color: sideColor(live.side) }}>
