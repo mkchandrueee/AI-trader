@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Optional
 
 import pandas as pd
 
-from database.db import write_df
+from database.db import upsert_candles
 from utils.logger import get_logger
 
 logger = get_logger("tick_collector")
@@ -71,7 +71,16 @@ class TickCollector:
                 df[c] = None
 
         try:
-            write_df(df[cols], "tick_data")
+            # ON CONFLICT DO NOTHING, not a bare append: two collector
+            # processes racing on the same symbol (or a websocket resend)
+            # can legitimately produce the same (timestamp, symbol) key.
+            # A bare INSERT dies on the first duplicate — this crashed the
+            # whole collector process on 2026-09-07 (see _kill_stalled_collector
+            # in backend/app.py for the actual root cause: duplicate
+            # collector processes piling up because pkill doesn't exist on
+            # Windows). One skipped duplicate row is the correct outcome;
+            # losing the rest of the trading day to an unhandled crash is not.
+            upsert_candles(df[cols], table="tick_data")
             logger.info(f"Flushed {len(self._buffer)} ticks to database.")
         except Exception as e:
             logger.error(f"Failed to flush ticks: {e}")
@@ -112,7 +121,7 @@ class TickCollector:
                 df[c] = None
 
         try:
-            write_df(df[cols], "tick_data")
+            upsert_candles(df[cols], table="tick_data")
             logger.info(f"Ingested {len(df)} historical ticks.")
         except Exception as e:
             logger.error(f"Failed to ingest historical ticks: {e}")

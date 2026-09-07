@@ -2175,10 +2175,51 @@ def _cache_prices_are_fresh(max_age_secs: int = 90) -> bool:
 
 
 def _kill_stalled_collector():
-    """Kill any running collect_ticks.py process (stalled or otherwise)."""
+    """
+    Kill any running collect_ticks.py process (stalled or otherwise).
+
+    `pkill` does not exist on Windows (this deployment's actual OS — the
+    original macOS-era code never accounted for that). subprocess.run(["pkill",
+    ...]) raised FileNotFoundError every time, swallowed by the bare except,
+    so this function silently did NOTHING on every call: each 30s stale-price
+    cycle in _ensure_collector() spawned a BRAND NEW collect_ticks.py on top
+    of whatever was already running, without ever killing the old one. Over
+    2026-09-07's session that piled up many concurrent collector processes,
+    all subscribing to the same AngelOne feed and racing to insert the same
+    (timestamp, symbol) ticks — the actual source of the duplicate-key
+    crashes that eventually took the whole collector down for the rest of
+    the trading day (see data/tick_collector.py's flush() for the other half
+    of that fix: duplicate ticks are now skipped, not fatal).
+
+    Primary path here: terminate the specific PID this process spawned
+    (no shell-out needed). Fallback: a platform-aware sweep for any OTHER
+    collect_ticks.py process we've lost track of (e.g. after a Flask
+    restart) — pkill on POSIX, a CIM/WMI process filter on Windows.
+    """
+    global _collector_process
+    if _collector_process is not None and _collector_process.poll() is None:
+        try:
+            _collector_process.terminate()
+            _collector_process.wait(timeout=5)
+        except Exception:
+            try:
+                _collector_process.kill()
+            except Exception:
+                pass
+    _collector_process = None
+
     try:
         import subprocess as sp
-        sp.run(["pkill", "-f", "collect_ticks.py"], capture_output=True)
+        import platform
+        if platform.system() == "Windows":
+            sp.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%collect_ticks.py%'\" "
+                 "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"],
+                capture_output=True, timeout=10,
+            )
+        else:
+            sp.run(["pkill", "-f", "collect_ticks.py"], capture_output=True, timeout=10)
         time.sleep(1)
     except Exception:
         pass
