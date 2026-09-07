@@ -7,6 +7,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
+from utils.console import fix_windows_console_encoding
+fix_windows_console_encoding()
+
 import shutil
 from pathlib import Path
 from datetime import datetime

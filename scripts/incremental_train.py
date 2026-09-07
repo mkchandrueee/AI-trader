@@ -16,6 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
+from utils.console import fix_windows_console_encoding
+fix_windows_console_encoding()
+
 BACKUP_DIR = Path("models/saved/backups")
 MACRO_MODEL_PATH = Path("models/saved/macro_model.pkl")
 MICRO_MODEL_PATH_P = Path("models/saved/micro_model.pkl")
