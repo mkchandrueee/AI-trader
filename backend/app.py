@@ -2788,6 +2788,78 @@ def api_risk_profiles():
         return jsonify({"error": str(e)}), 500
 
 
+def _describe_model_file(path: Path) -> dict:
+    """
+    Real metadata for one saved model, read off the file itself. The AI Models
+    page used to hardcode this ("LightGBM — 46K bars — AUC 0.98") from whatever
+    the original developer's machine had, which on any other install is simply
+    fiction — and overstating a model's AUC on a trading dashboard is the kind
+    of wrong number someone acts on. Everything here comes from disk.
+    """
+    info = {"path": str(path.relative_to(Path(__file__).resolve().parent.parent)).replace("\\", "/"),
+            "exists": path.exists()}
+    if not path.exists():
+        return info
+    info["modified"] = datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+    try:
+        import joblib
+        blob = joblib.load(path)
+    except Exception as e:
+        info["error"] = f"unreadable: {e}"
+        return info
+    if not isinstance(blob, dict):
+        info["algorithm"] = type(blob).__name__
+        return info
+    model = blob.get("model")
+    info["algorithm"] = type(model).__name__ if model is not None else None
+    feats = blob.get("features") or blob.get("feature_names") or []
+    info["n_features"] = len(feats) if hasattr(feats, "__len__") else None
+    if blob.get("n_samples") is not None:
+        info["n_samples"] = int(blob["n_samples"])
+    if blob.get("trained_at"):
+        info["trained_at"] = str(blob["trained_at"])
+    metrics = blob.get("metrics")
+    if isinstance(metrics, dict):
+        clean = {}
+        for k, v in metrics.items():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                clean[k] = v
+                continue
+            # NaN is not valid JSON — Flask emits a bare NaN token that
+            # JSON.parse rejects outright, taking the whole page's fetch down.
+            # A degenerate fold (math_decision_engine's AUC, from a 0.7%
+            # positive rate) legitimately produces one, so null it here.
+            clean[k] = None if f != f else round(f, 4)
+        info["metrics"] = clean
+    return info
+
+
+@app.route("/api/models/status")
+def api_models_status():
+    """
+    What is ACTUALLY on disk for this install — algorithm, feature count,
+    sample count, walk-forward metrics and file mtime, per model.
+    """
+    root = Path(__file__).resolve().parent.parent
+    saved = root / "models" / "saved"
+    strategy_models = {}
+    strat_dir = saved / "strategy"
+    if strat_dir.exists():
+        for f in sorted(strat_dir.glob("*_model.pkl")):
+            strategy_models[f.stem.replace("_model", "")] = _describe_model_file(f)
+    return jsonify({
+        "macro": _describe_model_file(saved / "macro_model.pkl"),
+        "micro": _describe_model_file(saved / "micro_model.pkl"),
+        "strategy": strategy_models,
+        "rl_exit_agent": {"path": "models/saved/rl_exit_agent.pkl",
+                          "exists": (saved / "rl_exit_agent.pkl").exists()},
+        "dqn_exit_agent": {"path": "models/saved/dqn_exit_agent.pt",
+                           "exists": (saved / "dqn_exit_agent.pt").exists()},
+    })
+
+
 @app.route("/api/rl/status")
 def api_rl_status():
     """Return RL / DQN agent status."""

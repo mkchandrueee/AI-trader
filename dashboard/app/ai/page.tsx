@@ -5,15 +5,48 @@ import Sidebar from "@/components/Sidebar";
 import { fetchJSON, type RLStatus } from "@/lib/api";
 import { RefreshCw } from "lucide-react";
 
+interface ModelInfo {
+  path: string;
+  exists: boolean;
+  algorithm?: string | null;
+  n_features?: number | null;
+  n_samples?: number;
+  trained_at?: string;
+  modified?: string;
+  metrics?: Record<string, number | null>;
+  error?: string;
+}
+
+interface ModelsStatus {
+  macro?: ModelInfo;
+  micro?: ModelInfo;
+  strategy?: Record<string, ModelInfo>;
+  rl_exit_agent?: ModelInfo;
+  dqn_exit_agent?: ModelInfo;
+}
+
+const fmtMetric = (v: number | null | undefined) =>
+  v === null || v === undefined ? "—" : v.toFixed(4);
+
+/** AUC below ~0.55 is barely better than a coin flip; say so rather than
+ *  printing a number that reads like a score. */
+const aucColor = (v: number | null | undefined) =>
+  v === null || v === undefined ? "#5a6270" : v >= 0.7 ? "#00e87b" : v >= 0.6 ? "#e8c300" : "#ff3e3e";
+
 export default function AIPage() {
   const [rl, setRl] = useState<RLStatus>({});
+  const [models, setModels] = useState<ModelsStatus>({});
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchJSON<RLStatus>("/api/rl/status").catch(() => ({}));
-      setRl(data);
+      const [rlData, modelData] = await Promise.all([
+        fetchJSON<RLStatus>("/api/rl/status").catch(() => ({})),
+        fetchJSON<ModelsStatus>("/api/models/status").catch(() => ({})),
+      ]);
+      setRl(rlData);
+      setModels(modelData);
     } finally {
       setLoading(false);
     }
@@ -65,10 +98,11 @@ export default function AIPage() {
               </p>
             )}
             <div className="mt-4 pt-4" style={{ borderTop: '1px solid #252a33' }}>
-              <p className="text-[10px]" style={{ color: '#5a6270' }}>LAST KNOWN RESULTS:</p>
-              <p className="text-[10px] mt-1">Trained on <span style={{ color: '#c8cdd5' }}>247,234 episodes</span> · 124 days · 11,606 states</p>
-              <p className="text-[10px]">Eval: <span style={{ color: '#00e87b' }}>88.1% WR</span>, <span style={{ color: '#00e87b' }}>+1.01% avg P&L</span></p>
-              <p className="text-[10px]">Backtest: <span style={{ color: '#00e87b' }}>100% RL_EXIT WR</span></p>
+              <p className="text-[10px]" style={{ color: '#5a6270' }}>
+                Used by the tick-replay <span style={{ color: '#c8cdd5' }}>backtest only</span> — the live exit path
+                (trailing SL, breakeven lock, regime tiers) does not consult it, so an untrained agent does not
+                affect live trading. The backtest simply skips RL_EXIT when it is missing.
+              </p>
             </div>
           </div>
 
@@ -114,43 +148,84 @@ export default function AIPage() {
           </div>
         </div>
 
-        {/* System models grid */}
+        {/* Trained models — read from the files on disk, never hardcoded */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-[1px] mb-4">
-          {[
-            {
-              title: "Macro ML Model",
-              path: "models/saved/macro_model.pkl",
-              desc: "LightGBM — 46K bars — AUC 0.98",
-              details: ["80+ technical indicators", "Bull/Bear probability output", "Sep 2025–Mar 2026 training"],
-              color: "#4da6ff",
-            },
-            {
-              title: "Strategy Models",
-              path: "models/saved/strategy_*.pkl",
-              desc: "Per-strategy LightGBM classifiers",
-              details: ["Breakout, Reversal, Momentum", "Mar 10-20 tick data training", "Strategy success probability"],
-              color: "#e8c300",
-            },
-            {
-              title: "Vol Surface",
-              path: "strategy/vol_surface.py",
-              desc: "IV-based strike selection",
-              details: ["IV edge 30%, moneyness 25%", "OI liquidity 20%, theta 10%", "Optimal strike scoring"],
-              color: "#00e87b",
-            },
-          ].map(m => (
-            <div key={m.title} className="t-panel p-4">
-              <h3 className="text-[12px] font-bold uppercase tracking-wider mb-1" style={{ color: m.color }}>{m.title}</h3>
-              <p className="text-[10px] mb-2" style={{ color: '#3d4450' }}>{m.path}</p>
-              <p className="text-[11px] mb-3" style={{ color: '#c8cdd5' }}>{m.desc}</p>
+          {/* Macro */}
+          <div className="t-panel p-4">
+            <h3 className="text-[12px] font-bold uppercase tracking-wider mb-1" style={{ color: '#4da6ff' }}>Macro ML Model</h3>
+            <p className="text-[10px] mb-2" style={{ color: '#3d4450' }}>{models.macro?.path ?? "models/saved/macro_model.pkl"}</p>
+            {models.macro?.exists ? (
+              <>
+                <p className="text-[11px] mb-2" style={{ color: '#c8cdd5' }}>
+                  {models.macro.algorithm} — {models.macro.n_features} features
+                </p>
+                <p className="text-[10px]" style={{ color: '#5a6270' }}>
+                  › AUC <span style={{ color: aucColor(models.macro.metrics?.auc_roc), fontWeight: 600 }}>
+                    {fmtMetric(models.macro.metrics?.auc_roc)}
+                  </span> (walk-forward)
+                </p>
+                <p className="text-[10px]" style={{ color: '#5a6270' }}>› Accuracy {fmtMetric(models.macro.metrics?.accuracy)} · F1 {fmtMetric(models.macro.metrics?.f1)}</p>
+                <p className="text-[10px]" style={{ color: '#5a6270' }}>› Trained {models.macro.modified?.replace("T", " ")}</p>
+              </>
+            ) : (
+              <p className="text-[11px]" style={{ color: '#ff3e3e' }}>
+                NOT TRAINED — <code style={{ color: '#4da6ff' }}>python scripts/retrain_full.py</code>
+              </p>
+            )}
+          </div>
+
+          {/* Strategy models */}
+          <div className="t-panel p-4">
+            <h3 className="text-[12px] font-bold uppercase tracking-wider mb-1" style={{ color: '#e8c300' }}>Strategy Models</h3>
+            <p className="text-[10px] mb-2" style={{ color: '#3d4450' }}>models/saved/strategy/*_model.pkl</p>
+            {Object.keys(models.strategy ?? {}).length > 0 ? (
               <div className="space-y-0.5">
-                {m.details.map(d => (
-                  <p key={d} className="text-[10px]" style={{ color: '#5a6270' }}>› {d}</p>
+                {Object.entries(models.strategy ?? {}).map(([name, m]) => (
+                  <p key={name} className="text-[10px]" style={{ color: '#5a6270' }}>
+                    › {name} — AUC{" "}
+                    <span style={{ color: aucColor(m.metrics?.auc_roc), fontWeight: 600 }}>
+                      {fmtMetric(m.metrics?.auc_roc)}
+                    </span>
+                    {m.n_samples ? ` · n=${m.n_samples.toLocaleString()}` : ""}
+                  </p>
                 ))}
               </div>
-            </div>
-          ))}
+            ) : (
+              <p className="text-[11px]" style={{ color: '#ff3e3e' }}>
+                NOT TRAINED — <code style={{ color: '#4da6ff' }}>python scripts/retrain_full.py</code>
+              </p>
+            )}
+          </div>
+
+          {/* Micro */}
+          <div className="t-panel p-4">
+            <h3 className="text-[12px] font-bold uppercase tracking-wider mb-1" style={{ color: '#00e87b' }}>Micro ML Model</h3>
+            <p className="text-[10px] mb-2" style={{ color: '#3d4450' }}>{models.micro?.path ?? "models/saved/micro_model.pkl"}</p>
+            {models.micro?.exists ? (
+              <>
+                <p className="text-[11px] mb-2" style={{ color: '#c8cdd5' }}>
+                  {models.micro.algorithm} — {models.micro.n_features} features
+                </p>
+                <p className="text-[10px]" style={{ color: '#5a6270' }}>
+                  › AUC <span style={{ color: aucColor(models.micro.metrics?.auc_roc), fontWeight: 600 }}>
+                    {fmtMetric(models.micro.metrics?.auc_roc)}
+                  </span>
+                </p>
+              </>
+            ) : (
+              <p className="text-[11px]" style={{ color: '#5a6270' }}>
+                NOT TRAINED — needs tick history. Not blended into live scoring anyway
+                (disabled pending AUC &gt; 0.55), so this being absent changes nothing today.
+              </p>
+            )}
+          </div>
         </div>
+
+        <p className="text-[9px] mb-4" style={{ color: '#3d4450' }}>
+          Every figure above is read from the model file on disk at load time. AUC is walk-forward, on the data this
+          install actually trained on — it is not a win rate and not a probability of profit. Anything near 0.50 is
+          close to a coin flip regardless of how the trades then perform.
+        </p>
 
         {/* Kelly position sizer */}
         <div className="t-panel p-5">
