@@ -61,6 +61,25 @@ logger = get_logger("market_data")
 # way it already translates "NIFTY-I" to a real futures contract.
 _OPTION_ALIAS_RE = re.compile(r"^([A-Z]+)(\d{6})(\d+)(CE|PE)$")
 
+
+def _failed_frame(reason) -> pd.DataFrame:
+    """
+    An empty frame TAGGED as a failed request.
+
+    A refusal (rate limit, auth failure, upstream error) and "this window
+    genuinely has no candle" both used to come back as a bare empty frame,
+    which callers cannot tell apart. Date walk-back loops therefore read a
+    rate-limit refusal as "nothing traded that day", stepped back another
+    day, and burned another request — compounding the throttle and
+    eventually returning a candle from days earlier as if it were current.
+    Callers that care check `df.attrs.get("error")`; everything else keeps
+    treating it as empty, exactly as before. Same `.attrs` convention
+    backtest/option_resolver.py already uses for `_mode`.
+    """
+    df = pd.DataFrame()
+    df.attrs["error"] = str(reason) if reason else "request failed"
+    return df
+
 _INTERVAL_MAP = {
     "1min": "ONE_MINUTE",
     "3min": "THREE_MINUTE",
@@ -221,11 +240,11 @@ class MarketDataAdapter:
             resp = self._smart.getCandleData(params)
             if not resp.get("status"):
                 logger.error(f"getCandleData failed for {symbol}: {resp.get('message')}")
-                return pd.DataFrame()
+                return _failed_frame(resp.get("message"))
 
             rows = resp.get("data", [])
             if not rows:
-                return pd.DataFrame()
+                return pd.DataFrame()  # genuinely no candle in this window
 
             df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
@@ -240,7 +259,7 @@ class MarketDataAdapter:
 
         except Exception as e:
             logger.error(f"Error fetching bars for {symbol}: {e}")
-            return pd.DataFrame()
+            return _failed_frame(e)
 
     def fetch_historical_minute_bars(
         self,

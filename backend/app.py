@@ -3647,6 +3647,13 @@ def api_agent_delivery_enter():
         "side": side,
         "qty": qty,
         "entry_price": round(entry_price, 2),
+        # Same tagging convention as the intraday agent: which automation
+        # surfaced it, and which models actually made the call. Delivery
+        # picks are a two-model agreement, so both are named.
+        "agent": "delivery_agent",
+        "model": "market_scanner+nse_neuron_forecast",
+        "model_label": "Candle-quality scan, confirmed by AI Forecast",
+        "source": "agent-suggested, human-placed",
         "target1": body.get("target1"),
         "target2": body.get("target2"),
         "stop_loss": body.get("stop_loss"),

@@ -218,6 +218,16 @@ def _resolve_atm_symbols(symbol: str, spot: float) -> Optional[dict]:
     }
 
 
+class _FetchRefused(Exception):
+    """
+    The broker refused the request (rate limit, auth, upstream error) — as
+    opposed to answering "no candle in that window". The difference matters
+    to the walk-back below: stepping back a day on a refusal is both wrong
+    (the day may well have data) and actively harmful (another request,
+    deeper into the rate limit).
+    """
+
+
 def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, session_date: Optional[date] = None,
                          exchange: str = "NFO") -> Optional[dict]:
     """
@@ -238,6 +248,8 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
         end = datetime.combine(session_date, datetime.strptime(OPENING_WINDOW[1], "%H:%M").time())
         df = adapter.fetch_historical_bars(opt_symbol, start, end, "5min", exchange=exchange)
         if df.empty:
+            if df.attrs.get("error"):
+                raise _FetchRefused(df.attrs["error"])
             return None
         row = df.iloc[0]
     else:
@@ -247,6 +259,8 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
         end_bound = now if is_today else market_close
         df = adapter.fetch_historical_bars(opt_symbol, market_open, end_bound, timeframe, exchange=exchange)
         if df.empty:
+            if df.attrs.get("error"):
+                raise _FetchRefused(df.attrs["error"])
             return None
         if is_today:
             df = df[df["timestamp"] + timedelta(minutes=tf_minutes) <= now]
@@ -262,6 +276,7 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
 
 def _fetch_option_candle_with_fallback(
     adapter, opt_symbol: str, timeframe: str, mode: str, max_days: int = 7, exchange: str = "NFO",
+    today_only: bool = False,
 ) -> tuple[Optional[dict], Optional[date], bool]:
     """
     Try today's session first; if the market is closed today (weekend,
@@ -269,19 +284,31 @@ def _fetch_option_candle_with_fallback(
     walk back to the last session that has this candle. Returns
     (candle, session_date, is_live) — is_live is True only when the candle
     actually came from today's session.
+
+    `today_only` skips the walk-back entirely. Automated callers want this:
+    they act only on is_live data, so every fallback result they fetch is
+    discarded anyway — pure API spend, and enough of it to trip the rate
+    limit that then corrupts everyone else's reads.
+
+    A broker refusal aborts rather than walking back — see _FetchRefused.
     """
     d = date.today()
-    for i in range(max_days):
+    for i in range(1 if today_only else max_days):
         if i > 0:
             time.sleep(0.35)  # AngelOne historical REST: ~3 req/sec, same spacing as market_data_adapter.py
-        candle = _fetch_option_candle(adapter, opt_symbol, timeframe, mode, session_date=d, exchange=exchange)
+        try:
+            candle = _fetch_option_candle(adapter, opt_symbol, timeframe, mode, session_date=d, exchange=exchange)
+        except _FetchRefused as e:
+            logger.warning(f"{opt_symbol}: broker refused ({e}) — not walking back, the day may well have data")
+            return None, None, False
         if candle is not None:
             return candle, d, d == date.today()
         d = d - timedelta(days=1)
     return None, None, False
 
 
-def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str = "latest") -> dict:
+def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str = "latest",
+                      today_only: bool = False) -> dict:
     """
     Option Trade Decision Engine — Live. Runs analyse_option_pair on the
     requested ATM CE/PE candle, then checks whether its side agrees with
@@ -310,11 +337,14 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         return {"error": f"Could not resolve this week's ATM option contracts for {symbol}."}
 
     exch = resolved["exchange"]
-    ce_candle, ce_date, ce_live = _fetch_option_candle_with_fallback(adapter, resolved["ce_symbol"], timeframe, mode, exchange=exch)
-    pe_candle, pe_date, pe_live = _fetch_option_candle_with_fallback(adapter, resolved["pe_symbol"], timeframe, mode, exchange=exch)
+    ce_candle, ce_date, ce_live = _fetch_option_candle_with_fallback(
+        adapter, resolved["ce_symbol"], timeframe, mode, exchange=exch, today_only=today_only)
+    pe_candle, pe_date, pe_live = _fetch_option_candle_with_fallback(
+        adapter, resolved["pe_symbol"], timeframe, mode, exchange=exch, today_only=today_only)
     if ce_candle is None or pe_candle is None:
         window = "09:15-09:20" if mode == "opening" else f"latest closed {timeframe}"
-        return {"error": f"No {window} candle available for {resolved['ce_symbol']}/{resolved['pe_symbol']} in the last 7 sessions."}
+        scope = "today" if today_only else "the last 7 sessions"
+        return {"error": f"No {window} candle available for {resolved['ce_symbol']}/{resolved['pe_symbol']} in {scope}."}
 
     # CE and PE fall back independently (see _fetch_option_candle_with_fallback);
     # in practice they land on the same session, but if they ever disagree,
@@ -338,8 +368,15 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         # Compare against the SAME session's opening candle — if the live
         # fetch above fell back to a previous day, the opening reading must
         # come from that same day, not today's (possibly nonexistent) open.
-        opening_ce = _fetch_option_candle(adapter, resolved["ce_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch)
-        opening_pe = _fetch_option_candle(adapter, resolved["pe_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch)
+        try:
+            opening_ce = _fetch_option_candle(adapter, resolved["ce_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch)
+            opening_pe = _fetch_option_candle(adapter, resolved["pe_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch)
+        except _FetchRefused as e:
+            # Only the cross-check against the open — the primary reading
+            # above stands, so report it with the comparison unavailable
+            # rather than failing the whole call.
+            logger.warning(f"opening comparison skipped for {symbol}: {e}")
+            opening_ce = opening_pe = None
         if opening_ce and opening_pe:
             opening_decision = analyse_option_pair(
                 (opening_ce["open"], opening_ce["high"], opening_ce["low"], opening_ce["close"]),

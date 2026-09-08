@@ -287,7 +287,7 @@ export default function LivePage() {
               <table>
                 <thead>
                   <tr>
-                    {["Time", "Contract", "Dir", "Entry ₹", "Current ₹", "SL ₹", "Target ₹", "Lots", "Unrealised P&L", ""].map(h => (
+                    {["Time", "Contract", "Dir", "Source", "Entry ₹", "Current ₹", "SL ₹", "Target ₹", "Lots", "Unrealised P&L", ""].map(h => (
                       <th key={h}>{h}</th>
                     ))}
                   </tr>
@@ -310,6 +310,20 @@ export default function LivePage() {
                         <td style={{ color: '#5a6270' }}>{p.entry_time}</td>
                         <td style={{ fontWeight: 600 }}>{p.symbol}</td>
                         <td><Badge label={p.direction} variant={p.direction === "CALL" ? "green" : "red"} /></td>
+                        {/* Which automation/model opened this, so an agent
+                            trade is never mistaken for a manual one. */}
+                        <td>
+                          {(p as unknown as { agent?: string }).agent ? (
+                            <span className="text-[9px] px-1.5 py-0.5" title={(p as unknown as { model_label?: string }).model_label}
+                              style={{ background: '#0a1a2a', border: '1px solid #1a3a5c', color: '#4da6ff' }}>
+                              🤖 {(p as unknown as { agent: string }).agent.replace(/_/g, " ")}
+                            </span>
+                          ) : (
+                            <span className="text-[10px]" style={{ color: '#5a6270' }}>
+                              {p.strategy?.replace(/_/g, " ") || "manual"}
+                            </span>
+                          )}
+                        </td>
                         <td>₹{p.entry_premium}</td>
                         <td style={{ color: pnlColor, fontWeight: 600 }}>
                           ₹{currentPrem.toFixed(1)}
@@ -359,7 +373,7 @@ export default function LivePage() {
                       {/* Journey chart row */}
                       {journeyId === p.id && journeyData && (
                         <tr key={`journey-${p.id}`}>
-                          <td colSpan={10} style={{ padding: '12px 8px', background: '#0d1117', borderBottom: '1px solid #1e2530' }}>
+                          <td colSpan={11} style={{ padding: '12px 8px', background: '#0d1117', borderBottom: '1px solid #1e2530' }}>
                             <div style={{ marginBottom: 6, fontSize: 11, color: '#5a6270', display: 'flex', gap: 16, alignItems: 'center' }}>
                               <span style={{ color: '#e8e8e8', fontWeight: 600 }}>{journeyData.symbol} Journey</span>
                               <span>{journeyData.journey.length} data points</span>

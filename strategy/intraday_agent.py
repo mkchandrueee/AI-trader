@@ -44,6 +44,10 @@ LIVE_CACHE_FILE = "/tmp/td_live_prices.json"
 # candles, so anything faster just re-reads the same candle.
 ENTRY_INTERVAL_SECS = 60
 EXIT_CHECK_INTERVAL_SECS = 10
+# One live_confirmation is already several candle fetches (both legs, plus
+# the opening cross-check). Spacing the per-symbol calls keeps a full cycle
+# under AngelOne's ~3 req/sec ceiling instead of self-throttling.
+INTER_CALL_PAUSE_SECS = 1.0
 # Square off anything still open before the close rather than carrying an
 # intraday option overnight.
 EOD_SQUAREOFF = dtime(15, 25)
@@ -88,7 +92,21 @@ def _reset_if_new_session():
         _state["log"] = []
         _state["opening_fired"] = set()
         # Any position still open across a date boundary is stale — the
-        # contract may not even exist any more. Drop rather than carry.
+        # contract may not even exist any more. Drop rather than carry, but
+        # close out its mirrored row first: dropping it silently would leave
+        # a phantom OPEN position sitting in the dashboard's paper book
+        # forever, with no agent left to ever close it.
+        for pos in _state.get("open_positions", {}).values():
+            mirror = pos.get("_mirror")
+            if mirror is not None and mirror.get("status") == "OPEN":
+                mirror.update({
+                    "status": "CLOSED",
+                    "exit_time": datetime.now().isoformat(),
+                    "exit_reason": "ABANDONED_SESSION_ROLLOVER",
+                    "exit_premium": mirror.get("current_premium"),
+                    "realised_pnl": mirror.get("unrealised_pnl") or 0,
+                    "unrealised_pnl": 0,
+                })
         _state["open_positions"] = {}
 
 
@@ -105,13 +123,22 @@ def arm(on: bool = True):
     return status()
 
 
+def _public(pos: dict) -> dict:
+    """Position minus internals — `_mirror` holds a live reference into the
+    shared paper book and has no business being serialised into the API."""
+    return {k: v for k, v in pos.items() if not k.startswith("_")}
+
+
 def status() -> dict:
     with _lock:
         return {
             "armed": _state["armed"],
+            "agent": AGENT_NAME,
+            "model": MODEL_NAME,
+            "model_label": MODEL_LABEL,
             "session_date": _state["session_date"],
-            "open_positions": list(_state["open_positions"].values()),
-            "closed_today": list(_state["closed_today"]),
+            "open_positions": [_public(p) for p in _state["open_positions"].values()],
+            "closed_today": [_public(p) for p in _state["closed_today"]],
             "log": list(reversed(_state["log"][-50:])),
             "last_cycle": _state["last_cycle"],
             "symbols": list(SUPPORTED_SYMBOLS),
@@ -188,6 +215,7 @@ def _open_position(symbol: str, mode: str, decision: dict) -> dict:
         "status": "OPEN",
     }
     _state["open_positions"][symbol] = pos
+    _mirror_open(pos)
     _log(symbol, "ENTER", f"{side.upper()} {opt_symbol} @ {pos['entry']} -> exit {pos['exit_target']} / stop {pos['stop']}",
          {"mode": mode, "confidence": pos["confidence"]})
     return pos
@@ -219,10 +247,15 @@ def run_cycle() -> dict:
         modes = ["latest"] if symbol in opening_fired else ["opening", "latest"]
         for mode in modes:
             try:
-                decision = live_confirmation(symbol, "5min", mode)
+                # today_only: the agent acts only on is_live data, so a
+                # walked-back candle would be fetched and then discarded —
+                # and enough of those trip the broker's rate limit, which
+                # then corrupts reads for the UI too.
+                decision = live_confirmation(symbol, "5min", mode, today_only=True)
             except Exception as e:
                 _log(symbol, "ERROR", f"{mode}: {e}")
                 continue
+            time.sleep(INTER_CALL_PAUSE_SECS)  # stay under AngelOne's ~3 req/sec
 
             if decision.get("error"):
                 _log(symbol, "SKIP", f"{mode}: {decision['error']}")
@@ -260,37 +293,91 @@ def _close_position(pos: dict, exit_price: float, reason: str):
     # scripts, which don't run utils.console.fix_windows_console_encoding().
     _log(pos["symbol"], "EXIT", f"{reason} @ {pos['exit_price']} -> P&L {pos['pnl']:+,.0f}",
          {"pnl": pos["pnl"]})
-    _mirror_to_paper_trades(pos)
+    _mirror_close(pos)
 
 
-def _mirror_to_paper_trades(pos: dict):
+# Tags carried on every mirrored position so the dashboard can say WHAT
+# produced a trade, not just that one exists. AGENT is the automation;
+# MODEL is the thing that actually made the call.
+AGENT_NAME = "intraday_agent"
+MODEL_NAME = "math_decision_engine"
+MODEL_LABEL = "Option Trade Decision Engine — Live"
+
+
+def _mirror_open(pos: dict):
     """
-    Copy the finished trade into the shared paper-trade list so it shows up in
-    the existing Trades / P&L views. Best-effort: a failure here must never
-    affect the agent's own book, which is the source of truth.
+    Publish the position to the shared paper book AS SOON AS IT OPENS, so it
+    is visible on the Live page while it is running — mirroring only on close
+    meant an in-flight agent trade appeared nowhere in the dashboard.
+
+    Keeps a reference on the agent position so the close updates this same
+    row in place instead of appending a duplicate. Best-effort throughout: a
+    mirroring failure must never affect the agent's own book, which is the
+    source of truth.
     """
     try:
         import backend.app as app_mod
-        app_mod.paper_positions_by_mode.setdefault("test", []).append({
+        mirror = {
             "symbol": pos["option_symbol"],
             "direction": "CALL" if pos["side"] == "call" else "PUT",
-            "strategy": "math_decision_engine_agent",
+            # `strategy` is what the existing Live/Trades tables already
+            # render, so the tag has to live there to be visible at all.
+            "strategy": f"{MODEL_NAME} ({AGENT_NAME})",
+            "agent": AGENT_NAME,
+            "model": MODEL_NAME,
+            "model_label": MODEL_LABEL,
+            "source": "agent",
+            "underlying": pos["symbol"],
+            "trigger_mode": pos["mode"],
             "entry_premium": pos["entry"],
-            "current_premium": pos["exit_price"],
-            "exit_premium": pos["exit_price"],
+            "current_premium": pos["entry"],
             "lot_size": pos["qty"],
             "lots": 1,
             "sl": pos["stop"],
+            "initial_sl": pos["stop"],
             "target": pos["exit_target"],
-            "status": "CLOSED",
+            "final_score": (pos.get("confidence") or 0) / 100,
+            "status": "OPEN",
             "entry_time": pos["entry_time"],
+            "unrealised_pnl": 0,
+            "exit_time": None,
+            "exit_premium": None,
+            "realised_pnl": None,
+            "exit_reason": None,
+        }
+        app_mod.paper_positions_by_mode.setdefault("test", []).append(mirror)
+        pos["_mirror"] = mirror
+    except Exception as e:
+        logger.debug(f"paper-trade open mirror skipped: {e}")
+
+
+def _mirror_close(pos: dict):
+    """Update the already-published row in place with the exit."""
+    mirror = pos.get("_mirror")
+    if mirror is None:
+        return
+    try:
+        mirror.update({
+            "status": "CLOSED",
+            "current_premium": pos["exit_price"],
+            "exit_premium": pos["exit_price"],
             "exit_time": pos["exit_time"],
             "exit_reason": pos["exit_reason"],
             "pnl": pos["pnl"],
             "realised_pnl": pos["pnl"],
+            "unrealised_pnl": 0,
         })
     except Exception as e:
-        logger.debug(f"paper-trade mirror skipped: {e}")
+        logger.debug(f"paper-trade close mirror skipped: {e}")
+
+
+def _mirror_price(pos: dict):
+    """Keep the mirrored row's live price/P&L in step while it's open."""
+    mirror = pos.get("_mirror")
+    if mirror is None:
+        return
+    mirror["current_premium"] = pos.get("current_premium")
+    mirror["unrealised_pnl"] = pos.get("unrealised_pnl")
 
 
 def check_exits() -> dict:
@@ -321,6 +408,7 @@ def check_exits() -> dict:
                 continue  # closed concurrently
             pos["current_premium"] = round(premium, 2)
             pos["unrealised_pnl"] = round((premium - pos["entry"]) * pos["qty"], 2)
+            _mirror_price(pos)
             if premium >= pos["exit_target"]:
                 _close_position(pos, pos["exit_target"], "TARGET")
             elif premium <= pos["stop"]:
