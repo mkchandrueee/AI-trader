@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import { API_BASE } from "@/lib/api";
 import { RefreshCw, Sunrise, Zap } from "lucide-react";
@@ -61,11 +61,49 @@ const INDEX_OPTIONS = [
   { value: "FINNIFTY", label: "FINNIFTY" },
   { value: "MIDCPNIFTY", label: "MIDCPNIFTY" },
   { value: "NIFTYNXT50", label: "NIFTY NEXT 50" },
+  { value: "SENSEX", label: "SENSEX" },
 ];
+
+interface AgentPosition {
+  symbol: string;
+  option_symbol: string;
+  side: "call" | "put";
+  mode: string;
+  qty: number;
+  entry: number;
+  exit_target: number;
+  stop: number;
+  confidence: number | null;
+  status: string;
+  current_premium?: number;
+  unrealised_pnl?: number;
+  exit_price?: number;
+  exit_reason?: string;
+  pnl?: number;
+}
+
+interface AgentStatus {
+  armed: boolean;
+  session_date: string | null;
+  open_positions: AgentPosition[];
+  closed_today: AgentPosition[];
+  log: { time: string; symbol: string; action: string; detail: string }[];
+  last_cycle: string | null;
+  symbols: string[];
+}
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
   return res.json(); // read the body regardless of status — error payloads carry {error}
+}
+
+async function postJSONRaw<T>(path: string, body: object): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.json();
 }
 
 function AgreementChip({ label, value }: { label: string; value: boolean | null }) {
@@ -88,6 +126,32 @@ export default function PreMarketPage() {
   const [liveLoading, setLiveLoading] = useState<string | null>(null); // which button is loading
   const [liveError, setLiveError] = useState<string | null>(null);
 
+  const [agent, setAgent] = useState<AgentStatus | null>(null);
+  const [agentBusy, setAgentBusy] = useState(false);
+
+  // Poll the agent every 10s — it acts on its own schedule, so the panel has
+  // to pull rather than only refreshing on user action.
+  useEffect(() => {
+    let alive = true;
+    const pull = () => {
+      getJSON<AgentStatus>("/api/agent/intraday/status")
+        .then((d) => { if (alive && d && typeof d.armed === "boolean") setAgent(d); })
+        .catch(() => {});
+    };
+    pull();
+    const id = setInterval(pull, 10_000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const toggleAgent = useCallback(async (armed: boolean) => {
+    setAgentBusy(true);
+    try {
+      const d = await postJSONRaw<AgentStatus>("/api/agent/intraday/arm", { armed });
+      if (d && typeof d.armed === "boolean") setAgent(d);
+    } catch { /* status poll will resync */ }
+    finally { setAgentBusy(false); }
+  }, []);
+
   const runNextday = useCallback(async (sym: string) => {
     setNextdayLoading(true);
     setNextdayError(null);
@@ -108,7 +172,7 @@ export default function PreMarketPage() {
     setLiveLoading(key);
     setLiveError(null);
     try {
-      const data = await getJSON<LiveConfirmation>(`/api/premarket/live?symbol=NIFTY&timeframe=${timeframe}&mode=${mode}`);
+      const data = await getJSON<LiveConfirmation>(`/api/premarket/live?symbol=${symbol}&timeframe=${timeframe}&mode=${mode}`);
       if (data.error) throw new Error(data.error);
       setLive(data);
     } catch (e) {
@@ -117,7 +181,7 @@ export default function PreMarketPage() {
     } finally {
       setLiveLoading(null);
     }
-  }, []);
+  }, [symbol]);
 
   const dirColor = (d: string | null) => (d === "bullish" ? "#00e87b" : d === "bearish" ? "#ff3e3e" : "#5a6270");
   const sideLabel = (s: string | null) => (s === "call" ? "BUY CALL" : s === "put" ? "BUY PUT" : "NO CLEAR SIDE");
@@ -138,6 +202,101 @@ export default function PreMarketPage() {
               ATM candle, and checks whether it still agrees.
             </p>
           </div>
+
+          {/* Intraday agent */}
+          {agent && (
+            <div className="t-panel p-4 mb-5" style={{ borderColor: agent.armed ? "#1a5c3a" : "#252a33" }}>
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "#5a6270" }}>
+                    Intraday Agent
+                  </h2>
+                  <span className="px-2 py-[3px] text-[9px] font-bold uppercase tracking-wider" style={{
+                    background: agent.armed ? "#0a2a18" : "#2a0a0a",
+                    border: `1px solid ${agent.armed ? "#00e87b" : "#5c1a1a"}`,
+                    color: agent.armed ? "#00e87b" : "#ff3e3e",
+                  }}>
+                    {agent.armed ? "● ARMED" : "○ DISARMED"}
+                  </span>
+                  <span className="text-[9px]" style={{ color: "#3d4450" }}>PAPER ONLY · 1 LOT · EXITS AT PARTIAL</span>
+                </div>
+                <button onClick={() => toggleAgent(!agent.armed)} disabled={agentBusy}
+                  className={`px-4 py-[6px] text-[11px] font-semibold uppercase tracking-wider disabled:opacity-50 ${agent.armed ? "" : "t-btn t-btn-green"}`}
+                  style={agent.armed ? { background: "#2a0a0a", border: "1px solid #5c1a1a", color: "#ff3e3e" } : undefined}>
+                  {agentBusy ? "…" : agent.armed ? "Stop agent" : "Arm agent"}
+                </button>
+              </div>
+
+              <p className="text-[10px] mb-3" style={{ color: "#5a6270" }}>
+                Reads the Trade Decision Engine on {`${agent.symbols.join(" / ")} `}— the fixed 09:15–09:20 opening candle
+                and each newly closed 5-minute candle. On a tradable side it takes one lot and closes the whole
+                position at the engine&apos;s partial-book level. Starts disarmed after every backend restart.
+              </p>
+
+              {agent.open_positions.length > 0 && (
+                <div className="overflow-x-auto mb-3">
+                  <table>
+                    <thead>
+                      <tr>{["Symbol", "Leg", "Side", "Qty", "Entry", "Exit at", "Stop", "Now", "Unreal. P&L"].map((h) => <th key={h}>{h}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {agent.open_positions.map((p) => (
+                        <tr key={p.option_symbol}>
+                          <td style={{ fontWeight: 600 }}>{p.symbol}</td>
+                          <td style={{ color: "#5a6270" }}>{p.option_symbol}</td>
+                          <td style={{ color: p.side === "call" ? "#00e87b" : "#ff3e3e", fontWeight: 600 }}>
+                            {p.side === "call" ? "BUY CE" : "BUY PE"}
+                          </td>
+                          <td>{p.qty}</td>
+                          <td>₹{p.entry}</td>
+                          <td style={{ color: "#00e87b" }}>₹{p.exit_target}</td>
+                          <td style={{ color: "#ff3e3e" }}>₹{p.stop}</td>
+                          <td>{p.current_premium != null ? `₹${p.current_premium}` : "—"}</td>
+                          <td style={{ color: (p.unrealised_pnl ?? 0) >= 0 ? "#00e87b" : "#ff3e3e", fontWeight: 600 }}>
+                            {p.unrealised_pnl != null ? `₹${p.unrealised_pnl >= 0 ? "+" : ""}${p.unrealised_pnl.toLocaleString("en-IN")}` : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {agent.closed_today.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {agent.closed_today.map((p, i) => (
+                    <span key={`${p.option_symbol}-${i}`} className="px-2 py-[3px] text-[9px] uppercase tracking-wider"
+                      style={{
+                        background: "#181c24",
+                        border: `1px solid ${(p.pnl ?? 0) >= 0 ? "#1a5c3a" : "#5c1a1a"}`,
+                        color: (p.pnl ?? 0) >= 0 ? "#00e87b" : "#ff3e3e",
+                      }}>
+                      {p.symbol} {p.exit_reason} ₹{(p.pnl ?? 0) >= 0 ? "+" : ""}{(p.pnl ?? 0).toLocaleString("en-IN")}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {agent.log.length > 0 && (
+                <details>
+                  <summary className="text-[10px] cursor-pointer" style={{ color: "#5a6270" }}>
+                    Decision log ({agent.log.length}) — every check, fired or skipped
+                  </summary>
+                  <div className="mt-2 max-h-40 overflow-y-auto">
+                    {agent.log.map((l, i) => (
+                      <div key={i} className="text-[9px] py-[2px]" style={{ color: "#5a6270" }}>
+                        <span style={{ color: "#3d4450" }}>{l.time}</span>{" "}
+                        <b style={{ color: l.action === "ENTER" ? "#00e87b" : l.action === "EXIT" ? "#4da6ff" : "#5a6270" }}>
+                          {l.symbol} {l.action}
+                        </b>{" "}
+                        {l.detail}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
 
           {/* NextDay Direction Analyser */}
           <div className="t-panel p-4 mb-5">
@@ -199,8 +358,9 @@ export default function PreMarketPage() {
             </h2>
             <p className="text-[10px] mb-4" style={{ color: "#5a6270" }}>
               Uses the latest fully closed 5-minute ATM CE and PE candle to confirm whether the current market
-              direction still agrees with the opening and Pre Market readings. NIFTY only — needs an active
-              AngelOne session (Connect via the sidebar).
+              direction still agrees with the opening and Pre Market readings. Reads whichever index is selected
+              above (NIFTY / BANKNIFTY / SENSEX have listed options) — needs an active AngelOne session
+              (Connect via the sidebar).
             </p>
 
             <h3 className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#5a6270" }}>

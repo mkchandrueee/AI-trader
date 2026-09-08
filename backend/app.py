@@ -3459,6 +3459,52 @@ def api_premarket_live():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Intraday Math-Engine Agent (PAPER only — see strategy/intraday_agent.py) ──
+
+
+@app.route("/api/agent/intraday/status")
+def api_agent_intraday_status():
+    """Armed flag, open/closed agent positions, and the rolling decision log."""
+    from strategy.intraday_agent import status as agent_status
+    return jsonify(agent_status())
+
+
+@app.route("/api/agent/intraday/arm", methods=["POST"])
+def api_agent_intraday_arm():
+    """
+    POST {"armed": true|false} — arm or stop the agent.
+
+    The agent starts DISARMED on every backend start and must be armed
+    explicitly: it opens paper positions with no per-trade confirmation, so a
+    restart silently resuming that is exactly the behaviour to avoid.
+    """
+    from strategy.intraday_agent import arm
+    body = request.get_json(silent=True) or {}
+    return jsonify(arm(bool(body.get("armed", True))))
+
+
+def _intraday_agent_loop():
+    """
+    Background thread: entry pass every ENTRY_INTERVAL_SECS, exit check every
+    EXIT_CHECK_INTERVAL_SECS. Both are no-ops while disarmed or out of hours,
+    so this can run from startup without doing anything until armed.
+    """
+    from strategy.intraday_agent import (
+        run_cycle, check_exits, ENTRY_INTERVAL_SECS, EXIT_CHECK_INTERVAL_SECS,
+    )
+    logger.info("Intraday agent thread started (disarmed).")
+    last_entry = 0.0
+    while True:
+        try:
+            check_exits()
+            if time.time() - last_entry >= ENTRY_INTERVAL_SECS:
+                last_entry = time.time()
+                run_cycle()
+        except Exception as e:
+            logger.error(f"Intraday agent loop error: {e}")
+        time.sleep(EXIT_CHECK_INTERVAL_SECS)
+
+
 # ── News Brief API (free RSS: ET, LiveMint, RBI, SEBI, Google News) ─────────
 
 
@@ -3509,6 +3555,10 @@ if __name__ == "__main__":
     # Start background scanner
     scanner_thread = threading.Thread(target=background_scanner, daemon=True)
     scanner_thread.start()
+
+    # Intraday math-engine agent — runs disarmed until explicitly armed via
+    # POST /api/agent/intraday/arm, so this thread is inert on a fresh start.
+    threading.Thread(target=_intraday_agent_loop, daemon=True, name="intraday-agent").start()
 
     # Auto-start tick monitor and data collector during market hours
     _ensure_tick_monitor()
