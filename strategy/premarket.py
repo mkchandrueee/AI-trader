@@ -17,8 +17,11 @@ reference tool describes:
    "Confirms" means the engine's own side pick (CALL/PUT) still matches;
    nothing here re-derives a new formula.
 
-NIFTY-only, matching `backtest/option_resolver.py` (the ATM/expiry
-resolution this reuses is itself NIFTY-only).
+Supports NIFTY, BANKNIFTY and SENSEX — see `_INDEX_CONFIG`. Each has its
+own exchange, strike gap, lot size and expiry calendar, all read from
+AngelOne's instrument master rather than hardcoded, since NSE/BSE keep
+changing them (BANKNIFTY lost its weekly expiries; SENSEX trades on BFO,
+not NFO).
 """
 
 from __future__ import annotations
@@ -37,6 +40,43 @@ logger = get_logger("premarket")
 LIVE_CACHE_FILE = "/tmp/td_live_prices.json"
 OPENING_WINDOW = ("09:15", "09:20")  # fixed first 5-minute candle, matches the reference SOP
 TIMEFRAME_MINUTES = {"5min": 5, "15min": 15, "30min": 30, "60min": 60}
+
+# Per-index contract facts, all verified against AngelOne's live instrument
+# master (2026-09-08). `lot_size` is only a fallback for display/sizing —
+# the real lotsize comes back on the resolved contract row itself, since
+# exchanges revise it and the master is republished daily.
+#   NIFTY     NFO, 50-pt strikes, weekly expiries
+#   BANKNIFTY NFO, 100-pt strikes, MONTHLY expiries only (weeklies withdrawn)
+#   SENSEX    BFO (not NFO), 100-pt strikes, weekly expiries
+_INDEX_CONFIG = {
+    "NIFTY":     {"exchange": "NFO", "strike_gap": 50,  "lot_size": 65},
+    "BANKNIFTY": {"exchange": "NFO", "strike_gap": 100, "lot_size": 30},
+    "SENSEX":    {"exchange": "BFO", "strike_gap": 100, "lot_size": 20},
+}
+SUPPORTED_SYMBOLS = tuple(_INDEX_CONFIG)
+
+
+def _nearest_expiry(symbol: str) -> Optional[date]:
+    """
+    The nearest still-open expiry for `symbol`, straight from AngelOne's
+    instrument master. Deliberately NOT backtest.option_resolver's
+    get_nearest_expiry(), which is NIFTY-only and additionally consults a
+    NIFTY-shaped regex over minute_candles for historical dates — this
+    only ever needs today's live contract, which is exactly the branch
+    that module resolves via resolver.expiries_for() anyway.
+    """
+    from data.angelone_symbols import resolver as symbol_resolver
+
+    today = date.today()
+    out = []
+    for raw in symbol_resolver.expiries_for(symbol, instrument_type="OPTIDX"):
+        try:
+            d = datetime.strptime(raw, "%d%b%Y").date()
+        except ValueError:
+            continue
+        if d >= today:
+            out.append(d)
+    return min(out) if out else None
 
 
 def _fetch_with_fallback(fetch_fn, start_date: date, max_days: int = 7) -> tuple[Optional[dict], Optional[date]]:
@@ -68,7 +108,15 @@ def _previous_session_ohlc(symbol: str = "NIFTY") -> tuple[Optional[dict], Optio
     H 23890 / L 23737.9 / C 23779.15, this code was returning Sep 4's).
     """
     from data.jugaad_adapter import fetch_index_bhavcopy
-    from strategy.market_scanner import INDEX_TRADING_SYMBOL, _find_col, _safe_float
+    from strategy.market_scanner import INDEX_TRADING_SYMBOL, _find_col, _safe_float, fetch_sensex_ohlc
+
+    # SENSEX is a BSE index — it appears nowhere in NSE's index bhavcopy, so
+    # it takes the AngelOne path the scanner already uses for it.
+    if symbol.upper() == "SENSEX":
+        ohlc = fetch_sensex_ohlc(date.today())
+        if ohlc is None:
+            return None, None
+        return {"high": ohlc["high"], "low": ohlc["low"], "close": ohlc["close"]}, ohlc["date"]
 
     index_name = next((k for k, v in INDEX_TRADING_SYMBOL.items() if v == symbol.upper()), None)
     if index_name is None:
@@ -143,26 +191,35 @@ def _resolve_atm_symbols(symbol: str, spot: float) -> Optional[dict]:
     That mismatch is why live option candle/websocket resolution silently
     returns nothing wherever the DB-alias format is used for a live call.
     """
-    from backtest.option_resolver import get_nearest_expiry, get_atm_strike
     from data.angelone_symbols import resolver as symbol_resolver
 
-    if symbol != "NIFTY":
-        return None  # ATM/expiry resolution below is NIFTY-only, see module docstring
-    expiry = get_nearest_expiry(date.today())
+    cfg = _INDEX_CONFIG.get(symbol.upper())
+    if cfg is None:
+        return None
+    expiry = _nearest_expiry(symbol)
     if expiry is None:
         return None
-    atm = get_atm_strike(spot)
-    ce_row = symbol_resolver.option_symbol_for("NIFTY", expiry, atm, "CE")
-    pe_row = symbol_resolver.option_symbol_for("NIFTY", expiry, atm, "PE")
+
+    gap = cfg["strike_gap"]
+    atm = int(round(spot / gap) * gap)
+    ce_row = symbol_resolver.option_symbol_for(symbol, expiry, atm, "CE", exchange=cfg["exchange"])
+    pe_row = symbol_resolver.option_symbol_for(symbol, expiry, atm, "PE", exchange=cfg["exchange"])
     if ce_row is None or pe_row is None:
         return None
+    # lotsize comes off the resolved contract itself — exchanges revise it
+    # and the master is republished daily, so prefer it over the static map.
+    try:
+        lot_size = int(float(ce_row.get("lotsize") or cfg["lot_size"]))
+    except (TypeError, ValueError):
+        lot_size = cfg["lot_size"]
     return {
-        "expiry": expiry, "atm": atm,
+        "expiry": expiry, "atm": atm, "exchange": cfg["exchange"], "lot_size": lot_size,
         "ce_symbol": ce_row["symbol"], "pe_symbol": pe_row["symbol"],
     }
 
 
-def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, session_date: Optional[date] = None) -> Optional[dict]:
+def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, session_date: Optional[date] = None,
+                         exchange: str = "NFO") -> Optional[dict]:
     """
     One OHLC candle for `opt_symbol` on `session_date` (default today): the
     fixed 09:15-09:20 opening candle (mode="opening", always 5-minute), or
@@ -179,7 +236,7 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
     if mode == "opening":
         start = datetime.combine(session_date, datetime.strptime(OPENING_WINDOW[0], "%H:%M").time())
         end = datetime.combine(session_date, datetime.strptime(OPENING_WINDOW[1], "%H:%M").time())
-        df = adapter.fetch_historical_bars(opt_symbol, start, end, "5min", exchange="NFO")
+        df = adapter.fetch_historical_bars(opt_symbol, start, end, "5min", exchange=exchange)
         if df.empty:
             return None
         row = df.iloc[0]
@@ -188,7 +245,7 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
         market_open = datetime.combine(session_date, datetime.strptime("09:15", "%H:%M").time())
         market_close = datetime.combine(session_date, datetime.strptime("15:30", "%H:%M").time())
         end_bound = now if is_today else market_close
-        df = adapter.fetch_historical_bars(opt_symbol, market_open, end_bound, timeframe, exchange="NFO")
+        df = adapter.fetch_historical_bars(opt_symbol, market_open, end_bound, timeframe, exchange=exchange)
         if df.empty:
             return None
         if is_today:
@@ -204,7 +261,7 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
 
 
 def _fetch_option_candle_with_fallback(
-    adapter, opt_symbol: str, timeframe: str, mode: str, max_days: int = 7,
+    adapter, opt_symbol: str, timeframe: str, mode: str, max_days: int = 7, exchange: str = "NFO",
 ) -> tuple[Optional[dict], Optional[date], bool]:
     """
     Try today's session first; if the market is closed today (weekend,
@@ -217,7 +274,7 @@ def _fetch_option_candle_with_fallback(
     for i in range(max_days):
         if i > 0:
             time.sleep(0.35)  # AngelOne historical REST: ~3 req/sec, same spacing as market_data_adapter.py
-        candle = _fetch_option_candle(adapter, opt_symbol, timeframe, mode, session_date=d)
+        candle = _fetch_option_candle(adapter, opt_symbol, timeframe, mode, session_date=d, exchange=exchange)
         if candle is not None:
             return candle, d, d == date.today()
         d = d - timedelta(days=1)
@@ -234,8 +291,9 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     """
     from data.market_data_adapter import MarketDataAdapter
 
-    if symbol != "NIFTY":
-        return {"error": "Live confirmation currently supports NIFTY only."}
+    symbol = symbol.upper()
+    if symbol not in _INDEX_CONFIG:
+        return {"error": f"Live confirmation supports {', '.join(SUPPORTED_SYMBOLS)} — not {symbol}."}
     if timeframe not in TIMEFRAME_MINUTES:
         return {"error": f"Unknown timeframe {timeframe!r}. Use one of {list(TIMEFRAME_MINUTES)}."}
 
@@ -251,8 +309,9 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     if resolved is None:
         return {"error": f"Could not resolve this week's ATM option contracts for {symbol}."}
 
-    ce_candle, ce_date, ce_live = _fetch_option_candle_with_fallback(adapter, resolved["ce_symbol"], timeframe, mode)
-    pe_candle, pe_date, pe_live = _fetch_option_candle_with_fallback(adapter, resolved["pe_symbol"], timeframe, mode)
+    exch = resolved["exchange"]
+    ce_candle, ce_date, ce_live = _fetch_option_candle_with_fallback(adapter, resolved["ce_symbol"], timeframe, mode, exchange=exch)
+    pe_candle, pe_date, pe_live = _fetch_option_candle_with_fallback(adapter, resolved["pe_symbol"], timeframe, mode, exchange=exch)
     if ce_candle is None or pe_candle is None:
         window = "09:15-09:20" if mode == "opening" else f"latest closed {timeframe}"
         return {"error": f"No {window} candle available for {resolved['ce_symbol']}/{resolved['pe_symbol']} in the last 7 sessions."}
@@ -279,8 +338,8 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         # Compare against the SAME session's opening candle — if the live
         # fetch above fell back to a previous day, the opening reading must
         # come from that same day, not today's (possibly nonexistent) open.
-        opening_ce = _fetch_option_candle(adapter, resolved["ce_symbol"], "5min", "opening", session_date=candle_session_date)
-        opening_pe = _fetch_option_candle(adapter, resolved["pe_symbol"], "5min", "opening", session_date=candle_session_date)
+        opening_ce = _fetch_option_candle(adapter, resolved["ce_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch)
+        opening_pe = _fetch_option_candle(adapter, resolved["pe_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch)
         if opening_ce and opening_pe:
             opening_decision = analyse_option_pair(
                 (opening_ce["open"], opening_ce["high"], opening_ce["low"], opening_ce["close"]),
@@ -294,6 +353,7 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         "symbol": symbol, "timeframe": timeframe, "mode": mode,
         "session_date": candle_session_date.isoformat(), "is_live": is_live,
         "spot": spot, "atm": resolved["atm"], "expiry": resolved["expiry"].isoformat(),
+        "exchange": resolved["exchange"], "lot_size": resolved["lot_size"],
         "ce_symbol": resolved["ce_symbol"], "pe_symbol": resolved["pe_symbol"],
         "ce_candle": ce_candle, "pe_candle": pe_candle,
         "side": decision.side, "tradable": decision.tradable,

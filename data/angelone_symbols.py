@@ -109,7 +109,8 @@ class AngelSymbolResolver:
         self.load()
         return self._by_symbol.get(f"{exchange}:{symbol}")
 
-    def option_symbol_for(self, underlying: str, expiry, strike: float, opt_type: str) -> Optional[dict]:
+    def option_symbol_for(self, underlying: str, expiry, strike: float, opt_type: str,
+                          exchange: str = "NFO") -> Optional[dict]:
         """
         Resolve an option contract by its structured fields rather than
         guessing a tradingsymbol string. AngelOne's real tradingsymbol for
@@ -124,7 +125,10 @@ class AngelSymbolResolver:
 
         `expiry` is a date; `strike` is the actual strike price (e.g. 22100,
         not AngelOne's internal ×100 integer storage — that scaling is
-        handled here).
+        handled here). `exchange` is "NFO" for NSE index options
+        (NIFTY/BANKNIFTY/FINNIFTY/...) and "BFO" for BSE's (SENSEX/BANKEX) —
+        the two live in the same instrument master under different exch_seg
+        values, so a SENSEX lookup against NFO silently finds nothing.
         """
         self.load()
         expiry_str = expiry.strftime("%d%b%Y").upper()
@@ -132,7 +136,7 @@ class AngelSymbolResolver:
         opt_type = opt_type.upper()
         for r in self._rows:
             if (r.get("name") == underlying and r.get("instrumenttype") == "OPTIDX"
-                    and r.get("expiry") == expiry_str and r.get("exch_seg") == "NFO"
+                    and r.get("expiry") == expiry_str and r.get("exch_seg") == exchange
                     and str(r.get("symbol", "")).endswith(opt_type)):
                 try:
                     if abs(float(r.get("strike", -1)) - target_strike) < 1:

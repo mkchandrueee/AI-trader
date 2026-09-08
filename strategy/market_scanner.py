@@ -117,12 +117,22 @@ DEFAULT_SECTOR_SOURCE = "nifty500"
 _SENSEX_FETCH_DAYS_BACK = 7  # walk back this many calendar days for weekends/holidays
 
 
-def _fetch_sensex_row(scan_date: date) -> Optional["ScanRow"]:
+def fetch_sensex_ohlc(scan_date: date) -> Optional[dict]:
+    """
+    SENSEX's last completed daily candle at/before `scan_date`, straight from
+    AngelOne (exchange "BSE") — BSE publishes no free bhavcopy, so this is
+    the only source wired up. Returns open/high/low/close/prev_close/date, or
+    None when AngelOne isn't connected or has nothing in the window.
+
+    Shared with strategy/premarket.py, which needs the same raw candle for
+    SENSEX's NextDay reading and ATM-strike spot — everything else in that
+    module reads NSE bhavcopy, which has no SENSEX row at all.
+    """
     from data.market_data_adapter import MarketDataAdapter
 
     adapter = MarketDataAdapter()
     if not adapter.authenticate():
-        logger.info("SENSEX row skipped — AngelOne not connected (free NSE data doesn't need this, BSE has no free bhavcopy).")
+        logger.info("SENSEX skipped — AngelOne not connected (free NSE data doesn't need this, BSE has no free bhavcopy).")
         return None
 
     end = datetime.combine(scan_date, datetime.min.time()) + timedelta(days=1)
@@ -137,13 +147,24 @@ def _fetch_sensex_row(scan_date: date) -> Optional["ScanRow"]:
 
     df = df.sort_values("timestamp")
     last = df.iloc[-1]
-    prev_close = float(df.iloc[-2]["close"]) if len(df) >= 2 else float("nan")
-    row = _score_row(
+    ts = last["timestamp"]
+    return {
+        "open": _safe_float(last["open"]), "high": _safe_float(last["high"]),
+        "low": _safe_float(last["low"]), "close": _safe_float(last["close"]),
+        "prev_close": float(df.iloc[-2]["close"]) if len(df) >= 2 else float("nan"),
+        "date": ts.date() if hasattr(ts, "date") else scan_date,
+    }
+
+
+def _fetch_sensex_row(scan_date: date) -> Optional["ScanRow"]:
+    ohlc = fetch_sensex_ohlc(scan_date)
+    if ohlc is None:
+        return None
+    return _score_row(
         "SENSEX", "index",
-        _safe_float(last["open"]), _safe_float(last["high"]), _safe_float(last["low"]), _safe_float(last["close"]),
-        prev_close, tradable_fno=True,
+        ohlc["open"], ohlc["high"], ohlc["low"], ohlc["close"],
+        ohlc["prev_close"], tradable_fno=True,
     )
-    return row
 
 _index_list_cache: dict[str, tuple[datetime, pd.DataFrame]] = {}
 _CONSTITUENTS_TTL = timedelta(hours=20)  # these lists change rarely (quarterly rebalance)
