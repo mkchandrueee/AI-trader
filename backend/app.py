@@ -3691,6 +3691,24 @@ def api_agent_delivery_exit():
     pos["status"] = "CLOSED"
     pos["pnl"] = round((exit_price - pos["entry_price"]) * pos["qty"] * sign, 2)
     logger.info(f"DELIVERY PAPER EXIT: {pos['symbol']} @ {pos['exit_price']} P&L {pos['pnl']}")
+
+    # File it into the same closed-trade history the Trades page reads, so
+    # delivery trades sit alongside intraday ones instead of only living on
+    # the Delivery tab. Open delivery holdings deliberately stay off the Live
+    # board: that view is intraday-option shaped (lots, premium, expiry) and a
+    # multi-day equity holding would render as nonsense there.
+    _closed_trades_by_mode.setdefault("test", []).append({
+        "id": pos["id"], "mode": "test",
+        "symbol": pos["symbol"], "direction": pos["side"],
+        "strategy": f"{pos.get('model', 'delivery')} ({pos.get('agent', 'delivery_agent')})",
+        "agent": pos.get("agent"), "model": pos.get("model"),
+        "model_label": pos.get("model_label"), "source": pos.get("source"),
+        "entry_premium": pos["entry_price"], "exit_premium": pos["exit_price"],
+        "lot_size": pos["qty"], "lots": 1,
+        "status": "CLOSED", "entry_time": pos["entry_time"], "exit_time": pos["exit_time"],
+        "exit_reason": "MANUAL", "pnl": pos["pnl"], "realised_pnl": pos["pnl"],
+        "unrealised_pnl": 0,
+    })
     return jsonify(pos)
 
 
@@ -3744,6 +3762,27 @@ if __name__ == "__main__":
     # Start background scanner
     scanner_thread = threading.Thread(target=background_scanner, daemon=True)
     scanner_thread.start()
+
+    # Hand the agent THIS process's real stores. It must not import
+    # backend.app to find them: started as `python backend/app.py` this file
+    # is __main__, so that import builds a second copy of the module with its
+    # own empty paper book, and every mirrored agent trade lands in a phantom
+    # list no route serves. Registration keeps one source of truth.
+    #
+    # The closed-trade sink deliberately does NOT go through
+    # _persist_closed_trade: that also drives the consecutive-SL cooldown
+    # which pauses the MAIN scanner's entries, and an agent stop has no
+    # business halting a separate system's trading.
+    def _persist_agent_trade(trade: dict):
+        _closed_trades_by_mode.setdefault("test", []).append(trade)
+        try:
+            with open(_paper_trades_file("test"), "a") as f:
+                f.write(json.dumps(trade, default=str) + "\n")
+        except Exception as e:
+            logger.warning(f"Failed to persist agent trade: {e}")
+
+    from strategy.intraday_agent import set_paper_book as _agent_bind
+    _agent_bind(paper_positions_by_mode, _persist_agent_trade)
 
     # Intraday math-engine agent — runs disarmed until explicitly armed via
     # POST /api/agent/intraday/arm, so this thread is inert on a fresh start.

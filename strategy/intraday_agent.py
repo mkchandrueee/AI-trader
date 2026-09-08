@@ -303,6 +303,32 @@ AGENT_NAME = "intraday_agent"
 MODEL_NAME = "math_decision_engine"
 MODEL_LABEL = "Option Trade Decision Engine — Live"
 
+# The shared paper book, handed over by backend/app.py at startup.
+#
+# This used to be `import backend.app as app_mod` inside the mirror. That is
+# broken whenever the backend is started the documented way — `python
+# backend/app.py` makes that file `__main__`, so importing `backend.app`
+# builds a SECOND, independent copy of the module with its own empty
+# paper_positions_by_mode (and its own OrderManager, scanner state, ...).
+# Every mirrored trade was appended to that phantom copy, which no route
+# serves, so agent trades executed correctly and then appeared nowhere.
+# Registration removes the module-identity guess entirely.
+_paper_book: Optional[dict] = None
+# Called with a finished trade so it reaches /api/paper/trades, which is what
+# the Trades page reads. Kept separate from the book above because the Live
+# page (open positions) and the Trades page (closed history) are fed by two
+# different stores.
+_persist_closed = None
+
+
+def set_paper_book(book: dict, persist_closed=None):
+    """Register the live paper-position store and closed-trade sink."""
+    global _paper_book, _persist_closed
+    _paper_book = book
+    _persist_closed = persist_closed
+    logger.info("Intraday agent bound to the live paper book%s.",
+                " + closed-trade history" if persist_closed else "")
+
 
 def _mirror_open(pos: dict):
     """
@@ -315,9 +341,13 @@ def _mirror_open(pos: dict):
     mirroring failure must never affect the agent's own book, which is the
     source of truth.
     """
+    if _paper_book is None:
+        logger.warning("No paper book registered — agent trade will not appear in the dashboard.")
+        return
     try:
-        import backend.app as app_mod
         mirror = {
+            "id": int(datetime.now().timestamp() * 1000),
+            "mode": "test",
             "symbol": pos["option_symbol"],
             "direction": "CALL" if pos["side"] == "call" else "PUT",
             # `strategy` is what the existing Live/Trades tables already
@@ -345,7 +375,7 @@ def _mirror_open(pos: dict):
             "realised_pnl": None,
             "exit_reason": None,
         }
-        app_mod.paper_positions_by_mode.setdefault("test", []).append(mirror)
+        _paper_book.setdefault("test", []).append(mirror)
         pos["_mirror"] = mirror
     except Exception as e:
         logger.debug(f"paper-trade open mirror skipped: {e}")
@@ -367,6 +397,9 @@ def _mirror_close(pos: dict):
             "realised_pnl": pos["pnl"],
             "unrealised_pnl": 0,
         })
+        # Also file it into the closed-trade history the Trades page reads.
+        if _persist_closed is not None:
+            _persist_closed(dict(mirror))
     except Exception as e:
         logger.debug(f"paper-trade close mirror skipped: {e}")
 
