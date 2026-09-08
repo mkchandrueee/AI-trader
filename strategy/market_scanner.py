@@ -289,6 +289,20 @@ def _safe_float(val) -> float:
         return float("nan")
 
 
+# swing.js's priceCfg(): minTargetStep is 16 RUPEES OF OPTION PREMIUM, which
+# is meaningless on a share price — on a ₹12 stock it demands a ₹16 target
+# step (producing a NEGATIVE target), and on a ₹3000 one it never binds at
+# all. The reference substitutes a percentage of price for underlying
+# candles; config.js's own default is 0.25%.
+SWING_MIN_STEP_PCT = 0.25
+
+
+def _underlying_cfg(close: float) -> dict:
+    """DEFAULT_CFG with the premium-scale target-step floor swapped for the
+    price-scale one — for index/stock rows only, never for option premiums."""
+    return {**DEFAULT_CFG, "minTargetStep": abs(close) * SWING_MIN_STEP_PCT / 100}
+
+
 def _mirror_side(o: float, h: float, l: float, c: float, cfg: dict) -> "LegAnalysis":
     """
     swing.js's shortRead: the SAME three-term formula as analyse_side, read
@@ -328,15 +342,16 @@ def _score_row(symbol: str, kind: str, o: float, h: float, l: float, c: float, p
     if not all(v == v and v > 0 for v in (o, h, l, c)):  # NaN/zero guard
         return None
 
-    long_leg = analyse_side(o, h, l, c, DEFAULT_CFG)
     if kind == "option":
-        # No mirror here — an option's own premium candle already has a
-        # real opposite number (the other leg), so analyse_side's
-        # bullish-only reading applied to that contract's own candle is
-        # correct as-is (see module docstring).
-        leg, is_long = long_leg, True
+        # Option premiums keep the ₹16 premium-scale target-step floor AND
+        # get no mirror — an option's own candle already has a real opposite
+        # number (the other leg), so analyse_side's bullish-only reading
+        # applied to that contract's own candle is correct (module docstring).
+        leg, is_long = analyse_side(o, h, l, c, DEFAULT_CFG), True
     else:
-        short_leg = _mirror_side(o, h, l, c, DEFAULT_CFG)
+        cfg = _underlying_cfg(c)  # price-scale floor, per swing.js's priceCfg
+        long_leg = analyse_side(o, h, l, c, cfg)
+        short_leg = _mirror_side(o, h, l, c, cfg)
         is_long = long_leg.confidence >= short_leg.confidence
         leg = long_leg if is_long else short_leg
 

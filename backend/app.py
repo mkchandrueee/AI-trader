@@ -3505,6 +3505,116 @@ def _intraday_agent_loop():
         time.sleep(EXIT_CHECK_INTERVAL_SECS)
 
 
+# ── Delivery / Swing Agent (suggest-only; PAPER positions) ──────────────────
+
+# Kept separate from paper_positions_by_mode on purpose: that store is
+# options-shaped (entry_premium, expiry, lots, premium decay, forced EOD
+# close). A delivery holding has none of those — it's plain quantity × price,
+# held across days.
+delivery_positions: list = []
+
+
+@app.route("/api/agent/delivery/picks")
+def api_agent_delivery_picks():
+    """
+    GET /api/agent/delivery/picks?min_confidence=100&top_n=10
+
+    Scanner rows at/above min_confidence, kept only where AI Forecast's
+    nearest-day call agrees with the scanner's side. Returns the dropped
+    candidates too (with the reason), so "no picks" is distinguishable from
+    "something broke".
+
+    Slow by nature — each confirmation trains/loads a per-symbol model, hence
+    the top_n cap and the per-day cache in strategy/delivery_agent.py.
+    """
+    try:
+        from strategy.delivery_agent import get_confirmed_picks
+        result = get_confirmed_picks(
+            min_confidence=float(request.args.get("min_confidence", 100)),
+            top_n=int(request.args.get("top_n", 10)),
+            min_qty=int(request.args.get("min_qty", 1)),
+            algorithm=request.args.get("algorithm", "lstm"),
+        )
+        return jsonify(result), 200 if "error" not in result else 404
+    except Exception as e:
+        logger.error(f"Delivery picks failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/agent/delivery/positions")
+def api_agent_delivery_positions():
+    """Open + closed delivery paper positions, with live P&L where priced."""
+    return jsonify({"positions": delivery_positions})
+
+
+@app.route("/api/agent/delivery/enter", methods=["POST"])
+def api_agent_delivery_enter():
+    """
+    POST {symbol, side, qty, entry_price, ...} — record a delivery paper
+    position. Human-initiated: the delivery agent only suggests, it never
+    calls this itself.
+    """
+    body = request.get_json(force=True) or {}
+    symbol = body.get("symbol")
+    side = (body.get("side") or "LONG").upper()
+    if not symbol:
+        return jsonify({"error": "symbol required"}), 400
+    if side not in ("LONG", "SHORT"):
+        return jsonify({"error": "side must be LONG or SHORT"}), 400
+    try:
+        qty = int(body.get("qty", 1))
+        entry_price = float(body.get("entry_price") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "qty and entry_price must be numeric"}), 400
+    if qty <= 0 or entry_price <= 0:
+        return jsonify({"error": "qty and entry_price must be positive"}), 400
+
+    pos = {
+        "id": f"{symbol}-{int(time.time())}",
+        "symbol": symbol,
+        "side": side,
+        "qty": qty,
+        "entry_price": round(entry_price, 2),
+        "target1": body.get("target1"),
+        "target2": body.get("target2"),
+        "stop_loss": body.get("stop_loss"),
+        "scanner_confidence": body.get("scanner_confidence"),
+        "forecast_label": body.get("forecast_label"),
+        "product": "CNC",          # delivery
+        "status": "OPEN",
+        "entry_time": datetime.now().isoformat(),
+        "current_price": None,
+        "unrealised_pnl": None,
+    }
+    delivery_positions.append(pos)
+    logger.info(f"DELIVERY PAPER ENTRY: {side} {qty} x {symbol} @ {pos['entry_price']}")
+    return jsonify(pos)
+
+
+@app.route("/api/agent/delivery/exit", methods=["POST"])
+def api_agent_delivery_exit():
+    """POST {id, exit_price} — close a delivery paper position."""
+    body = request.get_json(force=True) or {}
+    pos_id = body.get("id")
+    pos = next((p for p in delivery_positions if p["id"] == pos_id and p["status"] == "OPEN"), None)
+    if pos is None:
+        return jsonify({"error": f"No open delivery position with id {pos_id!r}"}), 404
+    try:
+        exit_price = float(body.get("exit_price") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "exit_price must be numeric"}), 400
+    if exit_price <= 0:
+        return jsonify({"error": "exit_price must be positive"}), 400
+
+    sign = 1 if pos["side"] == "LONG" else -1
+    pos["exit_price"] = round(exit_price, 2)
+    pos["exit_time"] = datetime.now().isoformat()
+    pos["status"] = "CLOSED"
+    pos["pnl"] = round((exit_price - pos["entry_price"]) * pos["qty"] * sign, 2)
+    logger.info(f"DELIVERY PAPER EXIT: {pos['symbol']} @ {pos['exit_price']} P&L {pos['pnl']}")
+    return jsonify(pos)
+
+
 # ── News Brief API (free RSS: ET, LiveMint, RBI, SEBI, Google News) ─────────
 
 
