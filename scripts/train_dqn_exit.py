@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
+from utils.console import fix_windows_console_encoding
+fix_windows_console_encoding()
+
 import numpy as np
 from models.dqn_exit_agent import DQNExitAgent
 from models.rl_exit_agent import compute_state

@@ -126,19 +126,40 @@ export default function AIPage() {
               <span className="w-[6px] h-[6px]" style={{ background: rl.tabular ? '#00e87b' : '#ff3e3e' }} />
             </div>
             {rl.tabular ? (
-              <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[11px]">
-                {[
-                  ["States",    rl.tabular.states?.toLocaleString() ?? "--"],
-                  ["Episodes",  rl.tabular.episodes?.toLocaleString() ?? "--"],
-                  ["Actions",   "HOLD / EXIT / TIGHTEN"],
-                  ["Type",      "Tabular Q-Table"],
-                ].map(([k, v]) => (
-                  <div key={String(k)}>
-                    <span style={{ color: '#5a6270' }}>{k}</span>
-                    <p className="font-semibold" style={{ color: '#c8cdd5' }}>{v}</p>
-                  </div>
-                ))}
-              </div>
+              <>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[11px]">
+                  {[
+                    ["States",    rl.tabular.states?.toLocaleString() ?? "--"],
+                    ["Episodes",  rl.tabular.episodes?.toLocaleString() ?? "--"],
+                    ["Actions",   "HOLD / EXIT / TIGHTEN"],
+                    ["Type",      "Tabular Q-Table"],
+                  ].map(([k, v]) => (
+                    <div key={String(k)}>
+                      <span style={{ color: '#5a6270' }}>{k}</span>
+                      <p className="font-semibold" style={{ color: '#c8cdd5' }}>{v}</p>
+                    </div>
+                  ))}
+                </div>
+                {/* A file existing is not the same as an agent that works.
+                    Trained on a handful of episodes the Q-table collapses to
+                    one action for every state — it never exits — and without
+                    this the card would just read green. */}
+                {(() => {
+                  const dist = (rl.tabular as unknown as { policy_distribution?: Record<string, number> }).policy_distribution;
+                  const acted = dist ? Object.values(dist).filter(v => v > 0).length : 2;
+                  const eps = rl.tabular?.episodes ?? 0;
+                  if (acted > 1 && eps >= 1000) return null;
+                  const only = dist ? Object.entries(dist).find(([, v]) => v > 0)?.[0] : null;
+                  return (
+                    <p className="text-[10px] mt-3 p-2" style={{ background: '#2a0a0a', border: '1px solid #5c1a1a', color: '#ff6b6b' }}>
+                      Degenerate policy — trained on {eps.toLocaleString()} episodes
+                      {only ? `, and it picks ${only} in every one of ${rl.tabular?.states} states` : ""}.
+                      It is loaded but has learned nothing useful; treat it as untrained until there
+                      are far more backtest journeys to learn from.
+                    </p>
+                  );
+                })()}
+              </>
             ) : (
               <p className="text-[11px]" style={{ color: '#3d4450' }}>
                 NOT LOADED — <code style={{ color: '#4da6ff' }}>python scripts/train_rl_exit.py --epochs 10</code>

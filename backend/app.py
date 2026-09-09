@@ -2909,6 +2909,24 @@ def api_market_candles():
 maintenance_job: dict = {"running": False, "job": None, "status": "idle", "output_lines": []}
 
 
+def _utf8_env() -> dict:
+    """
+    Child-process env with UTF-8 stdio forced.
+
+    Python on Windows defaults stdout to cp1252, so any script that prints a
+    →, ₹, — or box-drawing character dies mid-run with UnicodeEncodeError.
+    Four scripts call utils.console.fix_windows_console_encoding() for this,
+    but 21 others print such characters without it — train_rl_on_journeys.py
+    crashed on a literal "Hold→end" after training had already started.
+    Setting PYTHONIOENCODING here fixes every script this launcher can start,
+    including ones added later, rather than patching them one at a time as
+    each new crash surfaces.
+    """
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 @app.route("/api/data/coverage")
 def api_data_coverage():
     """
@@ -2970,6 +2988,7 @@ def _start_maintenance_job(name: str, cmd: list, label: str):
                 cmd, cwd=str(Path(__file__).resolve().parent.parent),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, encoding="utf-8", errors="replace",
+                env=_utf8_env(),
             )
             for line in proc.stdout:
                 line = line.strip()
@@ -3098,6 +3117,7 @@ def api_backtest_run():
                 cwd=str(project_root),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, encoding="utf-8", errors="replace",
+                env=_utf8_env(),  # see _utf8_env: cp1252 stdout kills scripts mid-run
             )
             for line in proc.stdout:
                 line = line.strip()
