@@ -32,13 +32,13 @@ def backfill_history(days: int, strikes_each_side: int = 3):
     td = MarketDataAdapter()
     if not td.authenticate():
         print("ERROR: AngelOne authentication failed.")
-        return
+        return 1
 
     print("Fetching NIFTY-I 1-min candles...")
     nifty_bars = td.fetch_historical_bars("NIFTY-I", start, end, "1min")
     if nifty_bars.empty:
         print("ERROR: No NIFTY-I bars returned — aborting (can't resolve ATM without a price).")
-        return
+        return 1
     nifty_bars = nifty_bars.copy()
     nifty_bars["symbol"] = "NIFTY-I"
     upsert_candles(nifty_bars)
@@ -93,4 +93,7 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=10, help="Calendar days to look back (default 10)")
     parser.add_argument("--strikes", type=int, default=3, help="Strikes each side of ATM to backfill (default 3)")
     args = parser.parse_args()
-    backfill_history(args.days, args.strikes)
+    # Propagate failure: the AI Models page reports a job green/red purely on
+    # exit code, so a backfill that authenticated nothing and wrote nothing
+    # must not exit 0 — that would show "DONE" over a silent no-op.
+    sys.exit(backfill_history(args.days, args.strikes) or 0)

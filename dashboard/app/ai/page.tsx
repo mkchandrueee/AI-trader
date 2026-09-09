@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import Sidebar from "@/components/Sidebar";
-import { fetchJSON, type RLStatus } from "@/lib/api";
+import { fetchJSON, postJSON, type RLStatus } from "@/lib/api";
 import { RefreshCw } from "lucide-react";
 
 interface ModelInfo {
@@ -25,6 +25,26 @@ interface ModelsStatus {
   dqn_exit_agent?: ModelInfo;
 }
 
+interface CoverageBlock {
+  days?: number; bars?: number; rows?: number; symbols?: number;
+  first_day?: string; last_day?: string; error?: string;
+}
+
+interface Coverage {
+  candles?: CoverageBlock;
+  ticks?: CoverageBlock;
+  option_candles?: CoverageBlock;
+  collector_running?: boolean;
+  market_hours?: boolean;
+  tick_backfill_supported?: boolean;
+}
+
+interface JobProgress {
+  running?: boolean; job?: string | null; label?: string;
+  status?: string; output_lines?: string[]; exit_code?: number;
+  started?: string; finished?: string;
+}
+
 const fmtMetric = (v: number | null | undefined) =>
   v === null || v === undefined ? "—" : v.toFixed(4);
 
@@ -36,19 +56,46 @@ const aucColor = (v: number | null | undefined) =>
 export default function AIPage() {
   const [rl, setRl] = useState<RLStatus>({});
   const [models, setModels] = useState<ModelsStatus>({});
+  const [coverage, setCoverage] = useState<Coverage>({});
+  const [job, setJob] = useState<JobProgress>({});
+  const [backfillDays, setBackfillDays] = useState(30);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [rlData, modelData] = await Promise.all([
+      const [rlData, modelData, covData] = await Promise.all([
         fetchJSON<RLStatus>("/api/rl/status").catch(() => ({})),
         fetchJSON<ModelsStatus>("/api/models/status").catch(() => ({})),
+        fetchJSON<Coverage>("/api/data/coverage").catch(() => ({})),
       ]);
       setRl(rlData);
       setModels(modelData);
+      setCoverage(covData);
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  // Poll job output while something is running, then refresh the panels so
+  // a finished backfill/retrain is reflected without a manual click.
+  useEffect(() => {
+    if (!job.running) return;
+    const t = setInterval(async () => {
+      const p = await fetchJSON<JobProgress>("/api/maintenance/progress")
+        .catch(() => ({} as JobProgress));
+      setJob(p);
+      if (!p.running) load();
+    }, 2000);
+    return () => clearInterval(t);
+  }, [job.running, load]);
+
+  const startJob = useCallback(async (path: string, body: object) => {
+    try {
+      await postJSON(path, body);
+      setJob({ running: true, status: "running", output_lines: [] });
+    } catch (e) {
+      setJob({ running: false, status: "error", output_lines: [String(e)] });
     }
   }, []);
 
@@ -146,6 +193,118 @@ export default function AIPage() {
               </div>
             </div>
           </div>
+        </div>
+
+        {/* Training data — what the models actually have to learn from */}
+        <div className="t-panel p-5 mb-4">
+          <div className="flex items-center justify-between mb-1">
+            <h3 className="text-[12px] font-bold uppercase tracking-wider" style={{ color: '#e8c300' }}>
+              Market Data — Model Training Input
+            </h3>
+            {job.running && (
+              <span className="text-[10px]" style={{ color: '#e8c300' }}>
+                ⏳ {job.label || job.job} — running
+              </span>
+            )}
+          </div>
+          <p className="text-[10px] mb-4" style={{ color: '#5a6270' }}>
+            The models can only be as good as what is in the database. Read live from Postgres.
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-[1px] mb-4">
+            {/* Candles */}
+            <div className="p-3" style={{ background: '#111318', border: '1px solid #1e222c' }}>
+              <p className="text-[10px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>
+                NIFTY-I 1-min candles
+              </p>
+              <p className="text-[16px] font-bold" style={{ color: (coverage.candles?.days ?? 0) >= 60 ? '#00e87b' : '#e8c300' }}>
+                {coverage.candles?.days ?? "—"} <span className="text-[10px] font-normal" style={{ color: '#5a6270' }}>days</span>
+              </p>
+              <p className="text-[10px]" style={{ color: '#5a6270' }}>
+                {(coverage.candles?.bars ?? 0).toLocaleString()} bars
+              </p>
+              <p className="text-[10px]" style={{ color: '#3d4450' }}>
+                {coverage.candles?.first_day} → {coverage.candles?.last_day}
+              </p>
+              <p className="text-[9px] mt-1" style={{ color: '#3d4450' }}>Feeds macro + strategy models</p>
+            </div>
+
+            {/* Ticks */}
+            <div className="p-3" style={{ background: '#111318', border: '1px solid #1e222c' }}>
+              <p className="text-[10px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>
+                Tick history
+              </p>
+              <p className="text-[16px] font-bold" style={{ color: (coverage.ticks?.days ?? 0) >= 5 ? '#00e87b' : '#ff3e3e' }}>
+                {coverage.ticks?.days ?? "—"} <span className="text-[10px] font-normal" style={{ color: '#5a6270' }}>days</span>
+              </p>
+              <p className="text-[10px]" style={{ color: '#5a6270' }}>
+                {(coverage.ticks?.rows ?? 0).toLocaleString()} ticks
+              </p>
+              <p className="text-[10px]" style={{ color: '#3d4450' }}>
+                {coverage.ticks?.first_day} → {coverage.ticks?.last_day}
+              </p>
+              <p className="text-[9px] mt-1" style={{ color: '#3d4450' }}>Feeds the micro model</p>
+            </div>
+
+            {/* Option candles */}
+            <div className="p-3" style={{ background: '#111318', border: '1px solid #1e222c' }}>
+              <p className="text-[10px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>
+                Option candles
+              </p>
+              <p className="text-[16px] font-bold" style={{ color: '#4da6ff' }}>
+                {coverage.option_candles?.symbols ?? "—"} <span className="text-[10px] font-normal" style={{ color: '#5a6270' }}>contracts</span>
+              </p>
+              <p className="text-[10px]" style={{ color: '#5a6270' }}>
+                {(coverage.option_candles?.bars ?? 0).toLocaleString()} bars
+              </p>
+              <p className="text-[9px] mt-1" style={{ color: '#3d4450' }}>Backtest option premiums</p>
+            </div>
+          </div>
+
+          {/* Honest note: this is a hard platform limit, not a missing button */}
+          {coverage.tick_backfill_supported === false && (
+            <p className="text-[10px] mb-3 p-2" style={{ background: '#1a1a0a', border: '1px solid #5c5c1a', color: '#e8c300' }}>
+              Tick history cannot be backfilled — AngelOne&apos;s free tier has no historical tick endpoint.
+              It only accumulates forward from the live collector during market hours
+              (collector now: <b>{coverage.collector_running ? "running" : "not running"}</b>
+              {coverage.market_hours ? "" : ", market closed"}). Candles are unaffected and backfill normally.
+            </p>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-[10px] uppercase tracking-wider" style={{ color: '#5a6270' }}>Backfill days</label>
+            <input type="number" min={1} max={365} value={backfillDays}
+              onChange={e => setBackfillDays(Number(e.target.value))}
+              className="px-2 py-[5px] text-[11px] w-20"
+              style={{ background: '#0e1117', border: '1px solid #252a33', color: '#c8cdd5' }} />
+            <button onClick={() => startJob("/api/data/backfill", { days: backfillDays })}
+              disabled={job.running}
+              className="t-btn px-3 py-[5px] text-[10px] font-semibold uppercase tracking-wider disabled:opacity-40">
+              Load Market Data
+            </button>
+            <button onClick={() => startJob("/api/models/train", { target: "macro" })}
+              disabled={job.running}
+              className="t-btn px-3 py-[5px] text-[10px] font-semibold uppercase tracking-wider disabled:opacity-40">
+              Retrain Macro + Strategy
+            </button>
+            <button onClick={() => startJob("/api/models/train", { target: "rl" })}
+              disabled={job.running}
+              className="t-btn px-3 py-[5px] text-[10px] font-semibold uppercase tracking-wider disabled:opacity-40">
+              Train RL Exit Agent
+            </button>
+          </div>
+
+          {(job.output_lines?.length ?? 0) > 0 && (
+            <div className="mt-3 p-2 max-h-48 overflow-y-auto text-[10px]"
+              style={{ background: '#0d1117', border: '1px solid #1e222c', color: '#8b949e', fontFamily: 'JetBrains Mono' }}>
+              {job.output_lines?.map((l, i) => <div key={i}>{l}</div>)}
+              {!job.running && job.status && (
+                <div style={{ color: job.status === "done" ? '#00e87b' : '#ff3e3e' }}>
+                  — {job.status.toUpperCase()}{job.finished ? ` at ${job.finished}` : ""}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Trained models — read from the files on disk, never hardcoded */}

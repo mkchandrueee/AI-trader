@@ -2900,6 +2900,133 @@ def api_market_candles():
     return jsonify(df.to_dict(orient="records"))
 
 
+# ── Data coverage + maintenance jobs (backfill / retrain) ───────────────────
+#
+# One job at a time, same streaming-subprocess pattern the backtest runner
+# uses. These are the actions the AI Models page needs: without candle
+# history the macro/strategy models cannot train at all, and the page
+# previously gave no way to see coverage or fix it.
+maintenance_job: dict = {"running": False, "job": None, "status": "idle", "output_lines": []}
+
+
+@app.route("/api/data/coverage")
+def api_data_coverage():
+    """
+    What training data this install actually holds. Read live from the DB —
+    the models are only as good as this, so it should never be guessed at.
+    """
+    def _one(sql, params=None):
+        try:
+            df = read_sql(sql, params or {})
+            if df.empty:
+                return {}
+            row = df.to_dict(orient="records")[0]
+            # jsonify renders a date as an HTTP date string ("Wed, 06 Aug
+            # 2025 00:00:00 GMT"); ISO is what the UI actually wants.
+            return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()}
+        except Exception as e:
+            return {"error": str(e)}
+
+    candles = _one(
+        "SELECT COUNT(DISTINCT timestamp::date) AS days, COUNT(*) AS bars, "
+        "MIN(timestamp)::date AS first_day, MAX(timestamp)::date AS last_day "
+        "FROM minute_candles WHERE symbol = 'NIFTY-I'")
+    ticks = _one(
+        "SELECT COUNT(DISTINCT timestamp::date) AS days, COUNT(*) AS rows, "
+        "MIN(timestamp)::date AS first_day, MAX(timestamp)::date AS last_day "
+        "FROM tick_data")
+    options = _one(
+        "SELECT COUNT(DISTINCT symbol) AS symbols, COUNT(*) AS bars FROM minute_candles "
+        "WHERE symbol LIKE 'NIFTY%%CE' OR symbol LIKE 'NIFTY%%PE'")
+
+    return jsonify({
+        "candles": candles,
+        "ticks": ticks,
+        "option_candles": options,
+        "collector_running": _cache_prices_are_fresh(),
+        "market_hours": _is_market_hours(),
+        # Stated here so the UI never offers a button that cannot work:
+        # AngelOne's free tier has no historical tick endpoint (see
+        # data/market_data_adapter.fetch_historical_ticks), so tick history
+        # only ever accumulates forward from the live collector.
+        "tick_backfill_supported": False,
+    })
+
+
+def _start_maintenance_job(name: str, cmd: list, label: str):
+    global maintenance_job
+    import subprocess  # local import, matching the other job routes in this file
+    if maintenance_job["running"]:
+        return jsonify({"error": f"'{maintenance_job['job']}' is already running"}), 409
+
+    maintenance_job = {"running": True, "job": name, "label": label, "status": "running",
+                       "output_lines": [], "started": datetime.now().strftime("%H:%M:%S")}
+
+    def _run():
+        global maintenance_job
+        import subprocess
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(Path(__file__).resolve().parent.parent),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, encoding="utf-8", errors="replace",
+            )
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    maintenance_job["output_lines"].append(line)
+                    if len(maintenance_job["output_lines"]) > 80:
+                        maintenance_job["output_lines"] = maintenance_job["output_lines"][-80:]
+            proc.wait()
+            maintenance_job["status"] = "done" if proc.returncode == 0 else "error"
+            maintenance_job["exit_code"] = proc.returncode
+        except Exception as e:
+            maintenance_job["status"] = "error"
+            maintenance_job["output_lines"].append(f"ERROR: {e}")
+        finally:
+            maintenance_job["running"] = False
+            maintenance_job["finished"] = datetime.now().strftime("%H:%M:%S")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "started", "job": name})
+
+
+@app.route("/api/data/backfill", methods=["POST"])
+def api_data_backfill():
+    """Backfill NIFTY-I + ATM option 1-min candles for the last N days."""
+    days = int((request.get_json(silent=True) or {}).get("days", 30))
+    days = max(1, min(days, 365))
+    return _start_maintenance_job(
+        "backfill", [sys.executable, "scripts/backfill_history.py", "--days", str(days)],
+        f"Backfilling {days} days of candles")
+
+
+@app.route("/api/models/train", methods=["POST"])
+def api_models_train():
+    """
+    Retrain a model from the data currently in the DB. `target` picks which:
+      macro    — macro + per-strategy models (scripts/retrain_full.py)
+      rl       — tabular RL exit agent, needs backtest journeys first
+      dqn      — DQN exit agent, same prerequisite
+    """
+    target = (request.get_json(silent=True) or {}).get("target", "macro")
+    jobs = {
+        "macro": ([sys.executable, "scripts/retrain_full.py"], "Retraining macro + strategy models"),
+        "rl":    ([sys.executable, "scripts/train_rl_on_journeys.py", "--epochs", "30"], "Training RL exit agent"),
+        "dqn":   ([sys.executable, "scripts/train_dqn_exit.py", "--epochs", "10"], "Training DQN exit agent"),
+    }
+    if target not in jobs:
+        return jsonify({"error": f"unknown target {target!r}; use one of {list(jobs)}"}), 400
+    cmd, label = jobs[target]
+    return _start_maintenance_job(f"train:{target}", cmd, label)
+
+
+@app.route("/api/maintenance/progress")
+def api_maintenance_progress():
+    """Live output of the running backfill/train job."""
+    return jsonify(maintenance_job)
+
+
 backtest_progress: dict = {"running": False, "risk": None, "status": "idle", "output_lines": []}
 
 @app.route("/api/backtest/run", methods=["POST"])
