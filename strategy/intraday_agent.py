@@ -374,6 +374,17 @@ def _mirror_open(pos: dict):
             "exit_premium": None,
             "realised_pnl": None,
             "exit_reason": None,
+            # Same shape backend/app.py's _tick_monitor_loop uses for its own
+            # positions, so the Trades page's JourneyChart renders either kind
+            # identically. Seeded with the entry point so a trade that opens
+            # and closes within one check_exits() pass still has 2 points.
+            "journey": [{
+                "ts": pos["entry_time"],
+                "option_price": pos["entry"],
+                "nifty_price": 0,
+                "sl": pos["stop"],
+                "unrealised_pnl": 0,
+            }],
         }
         _paper_book.setdefault("test", []).append(mirror)
         pos["_mirror"] = mirror
@@ -397,6 +408,17 @@ def _mirror_close(pos: dict):
             "realised_pnl": pos["pnl"],
             "unrealised_pnl": 0,
         })
+        # Final journey point at the actual exit price/time, so the chart's
+        # last point always lands exactly on where the position closed —
+        # even a same-cycle open+close still ends up with entry + exit.
+        journey = mirror.setdefault("journey", [])
+        journey.append({
+            "ts": pos["exit_time"],
+            "option_price": pos["exit_price"],
+            "nifty_price": 0,
+            "sl": pos["stop"],
+            "unrealised_pnl": 0,
+        })
         # Also file it into the closed-trade history the Trades page reads.
         if _persist_closed is not None:
             _persist_closed(dict(mirror))
@@ -405,12 +427,28 @@ def _mirror_close(pos: dict):
 
 
 def _mirror_price(pos: dict):
-    """Keep the mirrored row's live price/P&L in step while it's open."""
+    """
+    Keep the mirrored row's live price/P&L in step while it's open, and
+    append a journey point (same shape/cadence contract as backend/app.py's
+    _tick_monitor_loop: one point roughly every EXIT_CHECK_INTERVAL_SECS,
+    capped at 500) so the Trades page has a real series to chart instead of
+    just an entry/exit pair.
+    """
     mirror = pos.get("_mirror")
     if mirror is None:
         return
     mirror["current_premium"] = pos.get("current_premium")
     mirror["unrealised_pnl"] = pos.get("unrealised_pnl")
+    journey = mirror.setdefault("journey", [])
+    journey.append({
+        "ts": datetime.now().isoformat(),
+        "option_price": pos.get("current_premium"),
+        "nifty_price": 0,
+        "sl": pos.get("stop"),
+        "unrealised_pnl": pos.get("unrealised_pnl", 0),
+    })
+    if len(journey) > 500:
+        del journey[:-500]
 
 
 def check_exits() -> dict:
