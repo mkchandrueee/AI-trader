@@ -35,7 +35,7 @@ import pandas as pd
 from database.db import read_sql
 from backtest.option_resolver import (
     get_nearest_expiry, get_atm_strike, build_option_symbol,
-    load_option_premiums_for_day, clear_cache,
+    load_option_premiums_for_day,
 )
 from models.rl_exit_agent import RLExitAgent
 from utils.logger import get_logger
@@ -43,13 +43,49 @@ from utils.logger import get_logger
 logger = get_logger("train_rl_exit")
 
 
-def extract_premium_trajectories(trading_date: date, max_hold: int = 45) -> list:
+def preload_option_candles() -> dict:
+    """
+    Bulk-load every NIFTY option candle once, instead of the on-demand
+    per-(symbol, date) DB round trip load_option_premiums_for_day() does.
+
+    extract_premium_trajectories() tries up to 6 candidate symbols per
+    sampled bar (3 strikes x 2 directions), sampled every 5 minutes across
+    up to 255 days -- tens of thousands of attempts, the overwhelming
+    majority of which miss (only a few dozen option contracts exist in the
+    whole DB at any time). Each attempt was still a real query: a training
+    run that should take a couple of minutes was instead taking 20-30+
+    minutes end to end. The entire option-candle table is small (a few
+    hundred thousand rows at most), so loading it all once up front and
+    slicing by symbol/date in memory is dramatically cheaper.
+
+    Pass the result as `option_cache` to extract_premium_trajectories().
+    """
+    df = read_sql(
+        "SELECT symbol, timestamp, close AS premium FROM minute_candles "
+        "WHERE symbol LIKE 'NIFTY%CE' OR symbol LIKE 'NIFTY%PE' "
+        "ORDER BY symbol, timestamp"
+    )
+    if df.empty:
+        return {}
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return {sym: g.reset_index(drop=True) for sym, g in df.groupby("symbol")}
+
+
+def extract_premium_trajectories(trading_date: date, max_hold: int = 45, option_cache: dict = None) -> list:
     """
     Extract option premium trajectories for training.
-    
+
     For each minute of the trading day, if there's a valid option contract,
     extract the premium series for the next `max_hold` bars.
-    
+
+    `option_cache` (see preload_option_candles() above), when given, is
+    sliced in memory instead of hitting the DB per candidate symbol --
+    tick-level premiums are not considered in this path, but historical
+    training days are almost always outside the live tick collector's
+    short retention window anyway, so the candle fallback is what this
+    would resolve to either way. Omit it to fall back to the original
+    per-symbol DB lookup (load_option_premiums_for_day, tick-aware).
+
     Returns list of dicts: {entry_premium, trajectory, sl, target, direction}
     """
     # Load NIFTY candles for the day
@@ -71,6 +107,12 @@ def extract_premium_trajectories(trading_date: date, max_hold: int = 45) -> list
 
     # Sample every 5th minute to avoid massive overlap
     sample_indices = range(30, len(candles) - max_hold, 5)
+    # minute_candles.timestamp is TIMESTAMPTZ; option_cache's timestamps
+    # inherit that tz-awareness from preload_option_candles()'s read_sql, so
+    # the bounds compared against them need to match or pandas raises
+    # instead of silently coercing.
+    day_start = pd.Timestamp(trading_date, tz="UTC")
+    day_end = day_start + pd.Timedelta(days=1)
 
     for idx in sample_indices:
         row = candles.iloc[idx]
@@ -85,7 +127,12 @@ def extract_premium_trajectories(trading_date: date, max_hold: int = 45) -> list
             for offset in [0, 1, -1]:
                 strike = atm + offset * 50
                 sym = build_option_symbol(expiry, strike, opt_type)
-                pdf = load_option_premiums_for_day(sym, trading_date)
+                if option_cache is not None:
+                    sym_df = option_cache.get(sym)
+                    pdf = (sym_df[(sym_df["timestamp"] >= day_start) & (sym_df["timestamp"] < day_end)]
+                           if sym_df is not None else pd.DataFrame())
+                else:
+                    pdf = load_option_premiums_for_day(sym, trading_date)
                 if pdf.empty:
                     continue
 
@@ -148,6 +195,10 @@ def train_agent(epochs: int = 10, max_hold: int = 45):
     trading_days = list(days["day"])
     print(f"  Available days: {len(trading_days)}")
 
+    option_cache = preload_option_candles()
+    print(f"  Preloaded option candles: {sum(len(v) for v in option_cache.values())} "
+          f"bars across {len(option_cache)} contracts")
+
     total_episodes = 0
     total_reward = 0
     best_reward = -float("inf")
@@ -157,8 +208,7 @@ def train_agent(epochs: int = 10, max_hold: int = 45):
         epoch_episodes = 0
 
         for day in trading_days:
-            clear_cache()
-            trajectories = extract_premium_trajectories(day, max_hold=max_hold)
+            trajectories = extract_premium_trajectories(day, max_hold=max_hold, option_cache=option_cache)
 
             for traj in trajectories:
                 result = agent.train_on_trajectory(
@@ -221,13 +271,13 @@ def evaluate_agent(max_hold: int = 45):
         ORDER BY 1
     """)
     trading_days = list(days["day"])
+    option_cache = preload_option_candles()
 
     results = {"RL_EXIT": 0, "TARGET": 0, "SL": 0, "TIMEOUT": 0, "TIGHTEN_EXIT": 0}
     pnls = []
 
     for day in trading_days:
-        clear_cache()
-        trajectories = extract_premium_trajectories(day, max_hold=max_hold)
+        trajectories = extract_premium_trajectories(day, max_hold=max_hold, option_cache=option_cache)
 
         for traj in trajectories:
             entry = traj["entry_premium"]

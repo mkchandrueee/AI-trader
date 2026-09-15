@@ -49,7 +49,7 @@ from utils.logger import get_logger
 log_dir = Path("logs")
 log_dir.mkdir(exist_ok=True)
 log_file = log_dir / f"paper_trade_{date.today().strftime('%Y%m%d')}.log"
-file_handler = logging.FileHandler(log_file)
+file_handler = logging.FileHandler(log_file, encoding="utf-8")
 file_handler.setFormatter(logging.Formatter(
     "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",

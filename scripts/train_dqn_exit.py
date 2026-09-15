@@ -23,8 +23,7 @@ fix_windows_console_encoding()
 import numpy as np
 from models.dqn_exit_agent import DQNExitAgent
 from models.rl_exit_agent import compute_state
-from scripts.train_rl_exit import extract_premium_trajectories
-from backtest.option_resolver import clear_cache
+from scripts.train_rl_exit import extract_premium_trajectories, preload_option_candles
 from database.db import read_sql
 from utils.logger import get_logger
 
@@ -56,6 +55,10 @@ def train(epochs: int = 10, max_hold: int = 45):
     print(f"  Trading days: {len(trading_days)}")
     print(f"  Network params: {agent.policy_summary()['params']:,}")
 
+    option_cache = preload_option_candles()
+    print(f"  Preloaded option candles: {sum(len(v) for v in option_cache.values())} "
+          f"bars across {len(option_cache)} contracts")
+
     best_reward = -float("inf")
 
     for epoch in range(epochs):
@@ -63,8 +66,7 @@ def train(epochs: int = 10, max_hold: int = 45):
         epoch_episodes = 0
 
         for day in trading_days:
-            clear_cache()
-            trajectories = extract_premium_trajectories(day, max_hold=max_hold)
+            trajectories = extract_premium_trajectories(day, max_hold=max_hold, option_cache=option_cache)
             for traj in trajectories:
                 result = agent.train_on_trajectory(
                     premium_trajectory=traj["trajectory"],
@@ -112,13 +114,13 @@ def evaluate(max_hold: int = 45):
         FROM minute_candles WHERE symbol = 'NIFTY-I' ORDER BY 1
     """)
     trading_days = list(days["day"])
+    option_cache = preload_option_candles()
 
     pnls = []
     exit_reasons = {}
 
     for day in trading_days:
-        clear_cache()
-        trajectories = extract_premium_trajectories(day, max_hold=max_hold)
+        trajectories = extract_premium_trajectories(day, max_hold=max_hold, option_cache=option_cache)
         for traj in trajectories:
             entry  = traj["entry_premium"]
             sl     = traj["sl"]

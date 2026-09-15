@@ -84,12 +84,45 @@ def generate_strategy_labels(
         logger.error(f"Unknown strategy: {strategy_name}")
         return pd.DataFrame()
 
+    # math_decision_engine looks up its ATM CE/PE candles from the DB inside
+    # each call — fine for its live use (one decision at a time) but fatal
+    # looped naively over every row here: many rows share the same (day,
+    # ATM strike) and so resolve to the same option symbol pair, but a plain
+    # per-row call still re-queries the DB every time. Across ~95k rows that
+    # was ~95k sequential round trips (tens of minutes, looked hung).
+    # Precompute the actual set of distinct pairs needed and batch-fetch
+    # them once; every row then just looks up its pair in memory.
+    candle_cache = None
+    call_kwargs = {}
+    if strategy_name == "math_decision_engine":
+        from strategy.math_decision_strategy import generate_signal, build_candle_cache
+        from backtest.option_resolver import get_nearest_expiry, get_atm_strike, build_option_symbol
+
+        pairs = set()
+        for row in df.itertuples(index=False):
+            close = getattr(row, "close", None)
+            if close is None:
+                continue
+            ts = getattr(row, "timestamp", None) or datetime.now()
+            ref_date = ts.date() if isinstance(ts, datetime) else datetime.now().date()
+            expiry = get_nearest_expiry(ref_date)
+            if expiry is None:
+                continue
+            atm = get_atm_strike(close)
+            pairs.add((build_option_symbol(expiry, atm, "CE"), build_option_symbol(expiry, atm, "PE")))
+
+        candle_cache = build_candle_cache(pairs)
+        logger.info(f"  math_decision_engine: {len(pairs)} distinct CE/PE pairs, "
+                    f"{len(candle_cache)} resolved from candle data")
+        strategy_func = generate_signal
+        call_kwargs = {"candle_cache": candle_cache}
+
     # Check which rows trigger this strategy and record the signal direction
     fires = []
     directions = []
     for i, row in df.iterrows():
         row_dict = row.to_dict()
-        signal = strategy_func(row_dict, "NIFTY-I")
+        signal = strategy_func(row_dict, "NIFTY-I", **call_kwargs)
         fires.append(signal is not None)
         directions.append(signal.direction if signal is not None else None)
 

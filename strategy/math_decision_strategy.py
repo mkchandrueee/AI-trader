@@ -356,7 +356,49 @@ def nextday_bias(prev_h: float, prev_l: float, prev_c: float, min_distance_pct: 
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def generate_signal(row: dict, symbol: str = ""):
+def build_candle_cache(symbol_pairs) -> dict:
+    """
+    Batch-fetch the latest candle for every (ce_symbol, pe_symbol) pair a
+    bulk caller needs, in one query instead of one-per-row.
+
+    generate_signal() normally resolves its own CE/PE candles with a DB
+    round trip per call — completely fine for its live use (one Pre Market
+    decision at a time). Strategy-model training calls it once per row of a
+    macro feature set (tens of thousands of rows, e.g.
+    models/strategy_models.generate_strategy_labels), and every row resolves
+    to a *distinct option symbol pair* drawn from a much smaller set — same
+    ATM strike + expiry recur across many rows of the same day/week. Looping
+    naively turned a 95k-row training pass into 95k sequential DB round
+    trips (tens of minutes, looked hung). Precompute the small set of pairs
+    actually needed and fetch them all here; pass the result to
+    generate_signal(..., candle_cache=...) to skip its own DB lookup.
+    """
+    from database.db import read_sql
+
+    symbols = sorted({s for pair in symbol_pairs for s in pair})
+    if not symbols:
+        return {}
+
+    symbol_list = ", ".join(f"'{s}'" for s in symbols)
+    candles = read_sql(f"""
+        SELECT DISTINCT ON (symbol) symbol, open, high, low, close
+        FROM minute_candles
+        WHERE symbol IN ({symbol_list})
+        ORDER BY symbol, timestamp DESC
+    """)
+    by_symbol = {
+        row["symbol"]: (float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]))
+        for row in candles.to_dict(orient="records")
+    }
+
+    cache = {}
+    for ce_symbol, pe_symbol in symbol_pairs:
+        if ce_symbol in by_symbol and pe_symbol in by_symbol:
+            cache[(ce_symbol, pe_symbol)] = (by_symbol[ce_symbol], by_symbol[pe_symbol])
+    return cache
+
+
+def generate_signal(row: dict, symbol: str = "", candle_cache: Optional[dict] = None):
     """
     Wraps analyse_option_pair() to match the (row, symbol) -> Signal|None
     interface every other strategy in signal_generator.STRATEGY_MAP uses.
@@ -365,10 +407,13 @@ def generate_signal(row: dict, symbol: str = ""):
     macro feature row), the Trade Decision Engine needs the current 5-minute
     ATM CE/PE *premium* candles — this reads them from the DB, resolving the
     ATM strike from `row["close"]` (the underlying's current price).
+
+    `candle_cache`, when given (see build_candle_cache() above), is consulted
+    instead of hitting the DB — for bulk/training callers only. Live callers
+    never pass it and get the exact same per-call DB lookup as before.
     """
     from strategy.signal_generator import Signal  # local import avoids a cycle
     from backtest.option_resolver import get_nearest_expiry, get_atm_strike, build_option_symbol
-    from database.db import read_sql
 
     close = row.get("close")
     if close is None:
@@ -385,23 +430,31 @@ def generate_signal(row: dict, symbol: str = ""):
     ce_symbol = build_option_symbol(expiry, atm, "CE")
     pe_symbol = build_option_symbol(expiry, atm, "PE")
 
-    candles = read_sql(
-        """
-        SELECT symbol, open, high, low, close
-        FROM minute_candles
-        WHERE symbol IN (:ce, :pe)
-        ORDER BY timestamp DESC
-        LIMIT 2
-        """,
-        {"ce": ce_symbol, "pe": pe_symbol},
-    )
-    if candles.empty or set(candles["symbol"]) != {ce_symbol, pe_symbol}:
-        return None
+    if candle_cache is not None:
+        cached = candle_cache.get((ce_symbol, pe_symbol))
+        if cached is None:
+            return None
+        call_ohlc, put_ohlc = cached
+    else:
+        from database.db import read_sql
 
-    ce_row = candles[candles["symbol"] == ce_symbol].iloc[0]
-    pe_row = candles[candles["symbol"] == pe_symbol].iloc[0]
-    call_ohlc = (float(ce_row.open), float(ce_row.high), float(ce_row.low), float(ce_row.close))
-    put_ohlc = (float(pe_row.open), float(pe_row.high), float(pe_row.low), float(pe_row.close))
+        candles = read_sql(
+            """
+            SELECT symbol, open, high, low, close
+            FROM minute_candles
+            WHERE symbol IN (:ce, :pe)
+            ORDER BY timestamp DESC
+            LIMIT 2
+            """,
+            {"ce": ce_symbol, "pe": pe_symbol},
+        )
+        if candles.empty or set(candles["symbol"]) != {ce_symbol, pe_symbol}:
+            return None
+
+        ce_row = candles[candles["symbol"] == ce_symbol].iloc[0]
+        pe_row = candles[candles["symbol"] == pe_symbol].iloc[0]
+        call_ohlc = (float(ce_row.open), float(ce_row.high), float(ce_row.low), float(ce_row.close))
+        put_ohlc = (float(pe_row.open), float(pe_row.high), float(pe_row.low), float(pe_row.close))
 
     decision = analyse_option_pair(call_ohlc, put_ohlc)
     if not decision.tradable:
