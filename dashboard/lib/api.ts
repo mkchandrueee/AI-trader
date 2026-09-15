@@ -27,9 +27,22 @@ export interface StreamPayload {
   total_pnl_live: number;
 }
 
+// Routes like /api/data/backfill return a JSON {"error": "..."} body describing
+// exactly what went wrong (e.g. which job is already running) — surface that
+// instead of just the status code, or callers only ever see "→ 409".
+async function _errorMessage(path: string, res: Response): Promise<string> {
+  try {
+    const body = await res.clone().json();
+    if (body?.error) return `${path} → ${body.error}`;
+  } catch {
+    // body wasn't JSON — fall through to the generic message
+  }
+  return `API ${path} → ${res.status}`;
+}
+
 export async function fetchJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
-  if (!res.ok) throw new Error(`API ${path} → ${res.status}`);
+  if (!res.ok) throw new Error(await _errorMessage(path, res));
   return res.json();
 }
 
@@ -39,7 +52,7 @@ export async function postJSON<T>(path: string, body?: object): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`API ${path} → ${res.status}`);
+  if (!res.ok) throw new Error(await _errorMessage(path, res));
   return res.json();
 }
 

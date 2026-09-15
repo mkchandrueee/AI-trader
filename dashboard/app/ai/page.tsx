@@ -64,14 +64,19 @@ export default function AIPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [rlData, modelData, covData] = await Promise.all([
+      const [rlData, modelData, covData, jobData] = await Promise.all([
         fetchJSON<RLStatus>("/api/rl/status").catch(() => ({})),
         fetchJSON<ModelsStatus>("/api/models/status").catch(() => ({})),
         fetchJSON<Coverage>("/api/data/coverage").catch(() => ({})),
+        // A job started before this page was (re)loaded is still running on
+        // the backend — without this, the page assumes nothing is running,
+        // enables the buttons, and the next click just bounces off a 409.
+        fetchJSON<JobProgress>("/api/maintenance/progress").catch(() => ({})),
       ]);
       setRl(rlData);
       setModels(modelData);
       setCoverage(covData);
+      setJob(jobData);
     } finally {
       setLoading(false);
     }
@@ -95,7 +100,16 @@ export default function AIPage() {
       await postJSON(path, body);
       setJob({ running: true, status: "running", output_lines: [] });
     } catch (e) {
-      setJob({ running: false, status: "error", output_lines: [String(e)] });
+      // A failure here (most often 409 — some other job is already running)
+      // does not mean nothing is running: re-sync with the backend's actual
+      // job state instead of inventing a local "error" that could describe
+      // a completely different, still-in-progress job as broken.
+      const p = await fetchJSON<JobProgress>("/api/maintenance/progress").catch(() => null);
+      if (p?.running) {
+        setJob(p);
+      } else {
+        setJob({ running: false, status: "error", output_lines: [String(e)] });
+      }
     }
   }, []);
 
@@ -312,6 +326,11 @@ export default function AIPage() {
               disabled={job.running}
               className="t-btn px-3 py-[5px] text-[10px] font-semibold uppercase tracking-wider disabled:opacity-40">
               Train RL Exit Agent
+            </button>
+            <button onClick={() => startJob("/api/models/train", { target: "dqn" })}
+              disabled={job.running}
+              className="t-btn px-3 py-[5px] text-[10px] font-semibold uppercase tracking-wider disabled:opacity-40">
+              Train DQN Exit Agent
             </button>
           </div>
 
