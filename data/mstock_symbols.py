@@ -68,15 +68,7 @@ class MStockSymbolResolver:
             return False
 
         try:
-            resp = mconnect.get_instruments()
-            # MConnect calls return the raw requests.Response object, not
-            # already-parsed JSON — confirmed live via broker/mstock_adapter.py's
-            # _as_json() (same SDK quirk, hit there first: calling .get()
-            # directly on the response raised "'Response' object has no
-            # attribute 'get'").
-            if hasattr(resp, "json"):
-                resp = resp.json()
-            rows = (resp or {}).get("data") or resp or []
+            rows = self._parse_instruments_response(mconnect.get_instruments())
             if not rows:
                 raise ValueError("empty instrument list in response")
             self._write_cache(rows)
@@ -91,6 +83,46 @@ class MStockSymbolResolver:
                 self._index(stale)
                 return True
             return False
+
+    def _parse_instruments_response(self, resp) -> list[dict]:
+        """
+        get_instruments() returns raw CSV bytes, not JSON — confirmed live:
+        the original JSON-only parsing crashed with "'bytes' object has no
+        attribute 'get'" the first time this ran against a real account.
+        Kite Connect's own instrument dump (mStock Type A mirrors it) is a
+        CSV with a header row (instrument_token, exchange_token,
+        tradingsymbol, name, last_price, expiry, strike, tick_size,
+        lot_size, instrument_type, segment, exchange) — parse defensively:
+        try JSON first (in case a future SDK version changes this), fall
+        back to CSV bytes/text.
+        """
+        import csv
+        import io
+
+        if isinstance(resp, dict):
+            return resp.get("data") or []
+
+        raw = resp
+        if hasattr(raw, "json") and hasattr(raw, "content"):
+            # requests.Response: try JSON, but don't let a JSONDecodeError
+            # here mask the real content — fall through to CSV on failure.
+            try:
+                parsed = raw.json()
+                if isinstance(parsed, dict):
+                    return parsed.get("data") or []
+                if isinstance(parsed, list):
+                    return parsed
+            except ValueError:
+                pass
+            raw = raw.content
+
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if isinstance(raw, str):
+            reader = csv.DictReader(io.StringIO(raw))
+            return list(reader)
+
+        return []
 
     def _read_cache(self, ignore_ttl: bool = False) -> Optional[list]:
         if not _CACHE_PATH.exists():

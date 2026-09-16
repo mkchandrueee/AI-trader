@@ -175,8 +175,14 @@ class MStockAdapter(BrokerAdapter):
     def _login(self, user_id: str, password: str, totp_code: str) -> bool:
         try:
             from tradingapi_a.mconnect import MConnect
-        except ImportError:
-            self._last_error = "mStock-TradingApi-A package not installed. Run: pip install mStock-TradingApi-A"
+        except ImportError as e:
+            # Show the real cause: pip having installed the package doesn't
+            # mean every import path works — mticker.py's Twisted/TLS stack
+            # (pyOpenSSL, service_identity) isn't declared as a dependency
+            # and failed with a *different* ModuleNotFoundError the first
+            # time this ran live. A hardcoded "not installed" message here
+            # would have hidden that entirely.
+            self._last_error = f"mStock-TradingApi-A import failed: {e}. Run: pip install mStock-TradingApi-A"
             logger.error(self._last_error)
             return False
 

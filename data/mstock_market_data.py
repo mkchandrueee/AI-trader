@@ -106,8 +106,8 @@ class MStockMarketData:
             return False
         try:
             from tradingapi_a.mconnect import MConnect
-        except ImportError:
-            logger.error("mStock-TradingApi-A not installed. Run: pip install mStock-TradingApi-A")
+        except ImportError as e:
+            logger.error(f"mStock-TradingApi-A import failed: {e}. Run: pip install mStock-TradingApi-A")
             return False
 
         try:
@@ -218,8 +218,16 @@ class MStockMarketData:
             return False
         try:
             from tradingapi_a.mticker import MTicker
-        except ImportError:
-            logger.error("mStock-TradingApi-A not installed. Run: pip install mStock-TradingApi-A")
+        except ImportError as e:
+            # mticker.py pulls in Twisted's TLS stack (pyOpenSSL,
+            # service_identity), which pip installing mStock-TradingApi-A
+            # does NOT bring along as a dependency — confirmed live: the
+            # generic "not installed" message here hid a real
+            # ModuleNotFoundError for 'OpenSSL' (then 'service_identity').
+            logger.error(
+                f"mStock-TradingApi-A mticker import failed: {e}. "
+                f"Run: pip install mStock-TradingApi-A pyOpenSSL service_identity"
+            )
             return False
 
         try:
