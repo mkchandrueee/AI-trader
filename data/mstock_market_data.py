@@ -90,6 +90,7 @@ class MStockMarketData:
         self._ws_connected = False
         self._callbacks: List[Callable] = []
         self._subscribed_tokens: Dict[str, str] = {}  # token(str) -> our symbol alias
+        self._logged_sample_tick = False  # one-time raw-tick diagnostic log, see ws_start_streaming
 
     # ── Authentication ───────────────────────────────────────────────────
 
@@ -281,7 +282,20 @@ class MStockMarketData:
 
         def on_ticks(ws, ticks):
             for raw in ticks:
-                parsed = self._parse_ws_tick(raw)
+                # Log the very first raw tick verbatim, unconditionally —
+                # the docs-summary field shapes I built _parse_ws_tick()
+                # from didn't match a real packet (open_interest turned out
+                # to be a tuple, not a plain int), and guessing again blind
+                # just repeats the same trial-and-error. Ground truth once,
+                # then fix precisely instead of guessing a third time.
+                if not self._logged_sample_tick:
+                    logger.info(f"mStock RAW TICK SAMPLE: {raw!r}")
+                    self._logged_sample_tick = True
+                try:
+                    parsed = self._parse_ws_tick(raw)
+                except Exception as e:
+                    logger.error(f"mStock tick parse error: {e} — raw={raw!r}")
+                    continue
                 if parsed is None:
                     continue
                 for cb in self._callbacks:
@@ -303,22 +317,45 @@ class MStockMarketData:
         self._ticker.on_reconnect = on_reconnect
         self._ticker.connect(threaded=True)
 
+    @staticmethod
+    def _num(v, kind=float, default=0):
+        """
+        Defensively coerce a tick field to a number. Confirmed live that at
+        least one field (open_interest) doesn't arrive as a plain scalar —
+        parsing it as int() directly raised "int() argument must be ...
+        not 'tuple'". Rather than special-case every field once the real
+        shape is known (from the RAW TICK SAMPLE log line in
+        ws_start_streaming), unwrap any list/tuple to its first element and
+        fall back to `default` on anything still not coercible, so a
+        surprising field type degrades a value to 0 instead of dropping
+        the whole tick.
+        """
+        if isinstance(v, (list, tuple)):
+            v = v[0] if v else default
+        if isinstance(v, dict):
+            v = v.get("value", default)
+        try:
+            return kind(v)
+        except (TypeError, ValueError):
+            return default
+
     def _parse_ws_tick(self, raw: dict) -> Optional[dict]:
         """Normalize mStock's tick dict to AngelOne's _parse_ws_tick() shape.
         VERIFY: field names (last_price, volume_traded, open_interest,
         depth.bid/depth.ask, last_traded_timestamp) are from the docs
-        summary, not a live packet — adjust here if a real tick differs."""
+        summary, not a live packet — check the RAW TICK SAMPLE log line
+        ws_start_streaming() emits and adjust here if a real tick differs."""
         token = str(raw.get("instrument_token", ""))
         symbol = self._subscribed_tokens.get(token)
         if symbol is None:
             return None
 
-        price = raw.get("last_price", 0) or 0
+        price = self._num(raw.get("last_price", 0))
         depth = raw.get("depth") or {}
         bid_levels = depth.get("bid") or []
         ask_levels = depth.get("ask") or []
-        bid = bid_levels[0].get("price", price) if bid_levels else price
-        ask = ask_levels[0].get("price", price) if ask_levels else price
+        bid = self._num((bid_levels[0] or {}).get("price", price)) if bid_levels else price
+        ask = self._num((ask_levels[0] or {}).get("price", price)) if ask_levels else price
 
         ts = raw.get("last_traded_timestamp") or raw.get("exchange_timestamp")
         if isinstance(ts, (int, float)):
@@ -328,11 +365,11 @@ class MStockMarketData:
 
         return {
             "symbol": symbol,
-            "price": float(price or 0),
-            "volume": int(raw.get("volume_traded", 0) or 0),
-            "oi": int(raw.get("open_interest", 0) or 0),
-            "bid_price": float(bid or 0),
-            "ask_price": float(ask or 0),
+            "price": price,
+            "volume": self._num(raw.get("volume_traded", 0), kind=int),
+            "oi": self._num(raw.get("open_interest", 0), kind=int),
+            "bid_price": bid,
+            "ask_price": ask,
             "timestamp": ts,
         }
 
