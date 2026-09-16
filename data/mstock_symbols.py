@@ -162,17 +162,19 @@ class MStockSymbolResolver:
 
     def current_futures_symbol(self, underlying: str, mconnect=None) -> Optional[dict]:
         """
-        Nearest-expiry FUT row for an index underlying — mirrors
-        AngelSymbolResolver.current_futures_symbol(). `instrument_type` value
-        ("FUT") and `expiry` format ("YYYY-MM-DD") follow Kite Connect's own
-        instrument-dump convention, not AngelOne's ("FUTIDX" / "DDMMMYYYY")
-        — unverified against a live mStock response, see module docstring.
+        Nearest-expiry futures row for an index underlying — mirrors
+        AngelSymbolResolver.current_futures_symbol(). Confirmed live
+        against a real 154k-row mStock instrument master: futures rows are
+        identified by `segment == "FUTIDX"`, NOT `instrument_type == "FUT"`
+        as first guessed by Kite-parity — `instrument_type` is oddly "XX"
+        for futures rows (e.g. NIFTY26SEPFUT). `expiry` as "YYYY-MM-DD" and
+        `exchange == "NFO"` were both correct on the first guess.
         """
         self.load(mconnect=mconnect)
         candidates = [
             r for r in self._rows
             if r.get("name") == underlying
-            and r.get("instrument_type") == "FUT"
+            and r.get("segment") == "FUTIDX"
             and r.get("exchange") == "NFO"
         ]
         if not candidates:
