@@ -70,6 +70,27 @@ from utils.logger import get_logger
 
 logger = get_logger("mstock_adapter")
 
+
+def _as_json(resp) -> dict:
+    """
+    Every MConnect call (login, verify_totp, place_order, get_net_position,
+    get_order_book, get_fund_summary, ...) returns the RAW `requests.Response`
+    object from its internal `_get()`/`_post()` — not already-parsed JSON,
+    despite what the API docs summary implies. Confirmed live: calling
+    `.get("data")` directly on it raised `'Response' object has no attribute
+    'get'`. Normalize once here instead of a `.json()` call at every site.
+    """
+    if resp is None:
+        return {}
+    if isinstance(resp, dict):
+        return resp
+    if hasattr(resp, "json"):
+        try:
+            return resp.json() or {}
+        except ValueError:
+            return {}
+    return {}
+
 # Map our OrderType -> mStock ordertype string (Kite-Connect-shaped values)
 _ORDER_TYPE_MAP = {
     OrderType.MARKET: "MARKET",
@@ -164,12 +185,12 @@ class MStockAdapter(BrokerAdapter):
             mc.set_api_key(MSTOCK_API_KEY)
             mc.login(user_id, password)
 
-            session = mc.verify_totp(MSTOCK_API_KEY, totp_code)
-            data = (session or {}).get("data") or {}
+            session = _as_json(mc.verify_totp(MSTOCK_API_KEY, totp_code))
+            data = session.get("data") or {}
             access_token = data.get("access_token")
 
             if not access_token:
-                self._last_error = (session or {}).get("message") or "mStock rejected the login (no reason given)"
+                self._last_error = session.get("message") or session.get("error_message") or "mStock rejected the login (no reason given)"
                 logger.error(f"mStock login failed: {self._last_error}")
                 self._connected = False
                 return False
@@ -240,11 +261,12 @@ class MStockAdapter(BrokerAdapter):
                 "0",                                                # _disclosed_quantity
                 request.tag[:20] if request.tag else "",            # _tag
             )
-            data = (resp or {}).get("data") or {}
+            resp = _as_json(resp)
+            data = resp.get("data") or {}
             order_id = data.get("order_id") or data.get("orderid")
 
             if not order_id:
-                message = (resp or {}).get("message") or "mStock did not return an order ID"
+                message = resp.get("message") or "mStock did not return an order ID"
                 logger.error(f"mStock order FAILED: {request.symbol} {request.side.value} — {message}")
                 return OrderResponse(status=OrderStatus.REJECTED, message=message, timestamp=datetime.now())
 
@@ -313,9 +335,9 @@ class MStockAdapter(BrokerAdapter):
             return []
 
         try:
-            resp = self._mc.get_net_position()
+            resp = _as_json(self._mc.get_net_position())
             positions = []
-            for pos in ((resp or {}).get("data") or []):
+            for pos in (resp.get("data") or []):
                 netqty = int(pos.get("net_quantity", pos.get("netqty", 0)) or 0)
                 if netqty != 0:
                     positions.append(Position(
@@ -337,8 +359,8 @@ class MStockAdapter(BrokerAdapter):
             return OrderResponse(status=OrderStatus.ERROR, message="Not connected")
 
         try:
-            resp = self._mc.get_order_book()
-            for o in ((resp or {}).get("data") or []):
+            resp = _as_json(self._mc.get_order_book())
+            for o in (resp.get("data") or []):
                 if str(o.get("order_id", o.get("orderid"))) == str(order_id):
                     return self._parse_order(o)
             return OrderResponse(order_id=order_id, status=OrderStatus.ERROR, message="No history")
@@ -351,8 +373,8 @@ class MStockAdapter(BrokerAdapter):
             return []
 
         try:
-            resp = self._mc.get_order_book()
-            return [self._parse_order(o) for o in ((resp or {}).get("data") or [])]
+            resp = _as_json(self._mc.get_order_book())
+            return [self._parse_order(o) for o in (resp.get("data") or [])]
         except Exception as e:
             logger.error(f"mStock get_orders failed: {e}")
             return []
@@ -381,8 +403,8 @@ class MStockAdapter(BrokerAdapter):
         responses = []
 
         try:
-            book = self._mc.get_order_book()
-            for o in ((book or {}).get("data") or []):
+            book = _as_json(self._mc.get_order_book())
+            for o in (book.get("data") or []):
                 status = str(o.get("status", o.get("order_status", ""))).lower()
                 if status in ("open", "pending", "open pending", "trigger pending", "validation pending"):
                     try:
@@ -418,7 +440,7 @@ class MStockAdapter(BrokerAdapter):
         if not self.is_connected:
             return {}
         try:
-            return self._mc.get_fund_summary()
+            return _as_json(self._mc.get_fund_summary())
         except Exception as e:
             logger.error(f"Margins fetch failed: {e}")
             return {}

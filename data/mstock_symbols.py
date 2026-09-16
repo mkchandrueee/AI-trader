@@ -69,6 +69,13 @@ class MStockSymbolResolver:
 
         try:
             resp = mconnect.get_instruments()
+            # MConnect calls return the raw requests.Response object, not
+            # already-parsed JSON — confirmed live via broker/mstock_adapter.py's
+            # _as_json() (same SDK quirk, hit there first: calling .get()
+            # directly on the response raised "'Response' object has no
+            # attribute 'get'").
+            if hasattr(resp, "json"):
+                resp = resp.json()
             rows = (resp or {}).get("data") or resp or []
             if not rows:
                 raise ValueError("empty instrument list in response")
