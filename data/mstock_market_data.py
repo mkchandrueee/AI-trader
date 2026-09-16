@@ -266,6 +266,12 @@ class MStockMarketData:
             return
 
         def on_connect(ws, response):
+            # Required per the official SDK's own usage example — omitting
+            # this was the bug the first live test hit: the server closed
+            # the connection (code 1000) within ~1s of every connect,
+            # because it never received this login frame and treated the
+            # stream as unauthenticated.
+            self._ticker.send_login_after_connect()
             tokens = [int(t) for t in self._subscribed_tokens if t.isdigit()]
             if tokens:
                 ws.subscribe(tokens)
