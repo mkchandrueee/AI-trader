@@ -3402,16 +3402,21 @@ def api_option_ticks():
 
 from broker.order_manager import OrderManager
 from broker.angelone_adapter import AngelOneAdapter
+from broker.mstock_adapter import MStockAdapter
 
-# A single AngelOneAdapter instance, always available to the Connect/status
-# routes below regardless of TRADE_MODE. In paper mode this exists purely so
-# the dashboard's Connect card can verify credentials work without needing
-# to flip into live trading first. In angelone mode it's the SAME instance
-# OrderManager executes orders through — connecting via the dashboard IS
-# connecting the live trading session, not a second independent one.
+# One adapter instance per broker, always available to the Connect/status
+# routes below regardless of TRADE_MODE. In paper mode these exist purely so
+# the dashboard's Connect cards can verify credentials work without needing
+# to flip into live trading first. Whichever one matches TRADE_MODE is the
+# SAME instance OrderManager executes orders through — connecting via the
+# dashboard IS connecting the live trading session, not a second independent
+# one. mStock is the intended broker for live trading going forward; AngelOne
+# stays available (and still powers all market data — see data/market_data_adapter.py).
 angelone_adapter = AngelOneAdapter()
+mstock_adapter = MStockAdapter()
 _trade_mode = os.getenv("TRADE_MODE", "paper").lower()
-order_manager = OrderManager(adapter=angelone_adapter if _trade_mode == "angelone" else None)
+_live_adapter = {"angelone": angelone_adapter, "mstock": mstock_adapter}.get(_trade_mode)
+order_manager = OrderManager(adapter=_live_adapter)
 
 
 @app.route("/api/broker/status")
@@ -3430,17 +3435,30 @@ def api_broker_connect():
 @app.route("/api/broker/auth/status")
 def api_broker_auth_status():
     """
-    Two ways to be connected: the automatic .env path (client code + PIN +
-    TOTP secret, computed via pyotp — see OrderManager.connect(), used at
-    Flask startup) or the manual dashboard Connect below. Either way, this
-    just reports whether it produced a live session — there's no OAuth
-    redirect step like Zerodha had. Reports on the shared `angelone_adapter`
-    regardless of TRADE_MODE, so this works even in paper mode.
+    Two ways to be connected per broker: the automatic .env path (credentials
+    + TOTP secret, computed via pyotp — see OrderManager.connect(), used at
+    Flask startup) or each broker's manual dashboard Connect below. Either
+    way, this just reports whether it produced a live session — there's no
+    OAuth redirect step for either broker. Reports on the shared adapter
+    instances regardless of TRADE_MODE, so this works even in paper mode —
+    both can be connected independently (connecting is just "verify
+    credentials work", not "start live trading").
     """
     return jsonify({
+        # Kept at top level for backwards compatibility with the existing
+        # AngelOne Connect card.
         "connected": angelone_adapter.is_connected,
         "broker": "AngelOne",
         "client_code": angelone_adapter.client_code if angelone_adapter.is_connected else None,
+        "angelone": {
+            "connected": angelone_adapter.is_connected,
+            "client_code": angelone_adapter.client_code if angelone_adapter.is_connected else None,
+        },
+        "mstock": {
+            "connected": mstock_adapter.is_connected,
+            "user_id": mstock_adapter.user_id if mstock_adapter.is_connected else None,
+        },
+        "trade_mode": _trade_mode,
     })
 
 
@@ -3477,6 +3495,42 @@ def api_broker_angelone_connect():
 def api_broker_angelone_disconnect():
     """Drop the current AngelOne session — dashboard 'Disconnect' action."""
     angelone_adapter.disconnect()
+    return jsonify({"connected": False})
+
+
+@app.route("/api/broker/mstock/connect", methods=["POST"])
+def api_broker_mstock_connect():
+    """
+    Manual Connect: user ID, password, and the current 6-digit TOTP code
+    (read off the user's own authenticator app) are typed into the
+    dashboard and sent straight here — this request never passes through
+    any chat session, and none of these values are logged. Works
+    regardless of TRADE_MODE (see `mstock_adapter` above) — connecting
+    here in paper mode just verifies your credentials without placing you
+    in live trading.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    user_id = str(body.get("user_id", "")).strip()
+    password = str(body.get("password", "")).strip()
+    totp = str(body.get("totp", "")).strip()
+
+    if not (user_id and password and totp):
+        return jsonify({"connected": False, "error": "user_id, password, and totp are all required"}), 400
+
+    ok = mstock_adapter.connect_manual(user_id, password, totp)
+    return jsonify({
+        "connected": ok,
+        "user_id": mstock_adapter.user_id if ok else None,
+        # mStock's own rejection reason — never a credential value, safe to
+        # send back.
+        "error": None if ok else mstock_adapter.last_error,
+    })
+
+
+@app.route("/api/broker/mstock/disconnect", methods=["POST"])
+def api_broker_mstock_disconnect():
+    """Drop the current mStock session — dashboard 'Disconnect' action."""
+    mstock_adapter.disconnect()
     return jsonify({"connected": False})
 
 

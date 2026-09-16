@@ -13,7 +13,7 @@ Intraday NIFTY options paper-trading system. Collects live ticks, trains XGBoost
 | Database | TimescaleDB (PostgreSQL 17) — hypertables for tick/candle data |
 | ML | XGBoost + LightGBM (scikit-learn pipeline), joblib `.pkl` models |
 | Data Feed | AngelOne SmartAPI (live WebSocket + historical REST, free) + jugaad-data (free EOD bhavcopy) |
-| Broker | AngelOne SmartAPI (free API access) — paper trading by default |
+| Broker | AngelOne SmartAPI (free API access) — paper trading by default. mStock Trading API (Type A) is the intended broker for live order execution going forward (`TRADE_MODE=mstock`) |
 | Runtime | macOS, Python venv at `.venv/`, Node in `dashboard/node_modules/` |
 
 ---
@@ -197,6 +197,36 @@ GET  https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.
 ```
 jugaad-data (`pip install jugaad-data`) covers free EOD bhavcopy / index /
 stock history — no auth, no endpoint to document (see `data/jugaad_adapter.py`).
+
+---
+
+## mStock Trading API (broker for live execution)
+
+`broker/mstock_adapter.py` — Type A (Kite-Connect-shaped) API, official SDK
+`pip install mStock-TradingApi-A` (`tradingapi_a.mconnect.MConnect` for
+REST, `tradingapi_a.mticker.MTicker` for WebSocket). Auth mirrors AngelOne:
+non-interactive via `.env` (API key + user ID + password + TOTP secret,
+6-digit code computed live via `pyotp`), or an interactive dashboard
+Connect (Settings page) taking a manually-entered TOTP code. Never run
+`scripts/mstock_check_auth.py` from chat — the user runs it locally.
+
+```
+Login:           POST https://api.mstock.trade/openapi/typea/connect/login
+Session (TOTP):  POST https://api.mstock.trade/openapi/typea/session/verifytotp  → access_token
+WebSocket:       wss://ws.mstock.trade?API_KEY=...&ACCESS_TOKEN=...
+```
+
+`place_order` takes `tradingsymbol` + `exchange` directly (no instrument
+token, unlike AngelOne). `get_historical_chart`/market-data calls DO need a
+token, resolved via `data/mstock_symbols.py` from mStock's own
+`get_instruments()` (requires an authenticated session, unlike AngelOne's
+anonymous public dump).
+
+**Currently order-execution only** — set `TRADE_MODE=mstock` to route
+orders through it. AngelOne still powers 100% of market data (live ticks,
+historical candles, instrument master) regardless of `TRADE_MODE`; a
+dual-source market-data phase (mStock as an additional/redundant feed
+alongside AngelOne) is planned but not yet built.
 
 ---
 
@@ -407,6 +437,15 @@ ANGEL_API_KEY=your_smartapi_key
 ANGEL_CLIENT_CODE=your_client_code
 ANGEL_PASSWORD_OR_PIN=your_trading_pin
 ANGEL_TOTP_SECRET=your_base32_totp_secret
+
+# mStock (Type A) — the broker for live order execution once TRADE_MODE
+# leaves "paper". AngelOne above still powers all market data regardless.
+MSTOCK_API_KEY=your_mstock_api_key
+MSTOCK_USER_ID=your_mstock_user_id
+MSTOCK_PASSWORD=your_mstock_password
+MSTOCK_TOTP_SECRET=your_base32_totp_secret
+
+TRADE_MODE=paper         # "paper" (default) | "angelone" | "mstock"
 
 # Optional overrides
 INITIAL_CAPITAL=50000

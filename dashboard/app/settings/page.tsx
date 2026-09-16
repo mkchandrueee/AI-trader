@@ -14,6 +14,9 @@ interface BrokerAuthStatus {
   broker?: string;
   client_code?: string | null;
   message?: string;
+  angelone?: { connected: boolean; client_code?: string | null };
+  mstock?: { connected: boolean; user_id?: string | null };
+  trade_mode?: string;
 }
 
 export default function SettingsPage() {
@@ -27,6 +30,12 @@ export default function SettingsPage() {
   const [totp, setTotp] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+
+  const [mstockUserId, setMstockUserId] = useState("");
+  const [mstockPassword, setMstockPassword] = useState("");
+  const [mstockTotp, setMstockTotp] = useState("");
+  const [mstockConnecting, setMstockConnecting] = useState(false);
+  const [mstockConnectError, setMstockConnectError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const p = await fetchJSON<Record<RiskLevel, RiskProfile>>("/api/risk/profiles").catch(() => null);
@@ -55,7 +64,11 @@ export default function SettingsPage() {
       });
       const res: { connected: boolean; client_code: string | null; error: string | null } = await r.json();
       if (res.connected) {
-        setBrokerStatus({ connected: true, broker: "AngelOne", client_code: res.client_code });
+        setBrokerStatus((prev) => ({
+          ...(prev || { connected: false }),
+          connected: true, broker: "AngelOne", client_code: res.client_code,
+          angelone: { connected: true, client_code: res.client_code },
+        }));
         // Clear credential fields from memory as soon as they're no longer needed.
         setPin("");
         setTotp("");
@@ -71,7 +84,43 @@ export default function SettingsPage() {
 
   const disconnectAngelOne = async () => {
     await postJSON("/api/broker/angelone/disconnect").catch(() => null);
-    setBrokerStatus({ connected: false });
+    setBrokerStatus((prev) => ({ ...(prev || { connected: false }), angelone: { connected: false } }));
+  };
+
+  const connectMstock = async () => {
+    setMstockConnecting(true);
+    setMstockConnectError(null);
+    try {
+      // Raw fetch, not postJSON — a 400 (bad credentials) is a normal
+      // response with a real error message in the body, not a
+      // connectivity failure.
+      const r = await fetch(`${API_BASE}/api/broker/mstock/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: mstockUserId, password: mstockPassword, totp: mstockTotp }),
+      });
+      const res: { connected: boolean; user_id: string | null; error: string | null } = await r.json();
+      if (res.connected) {
+        setBrokerStatus((prev) => ({
+          ...(prev || { connected: false }),
+          mstock: { connected: true, user_id: res.user_id },
+        }));
+        // Clear credential fields from memory as soon as they're no longer needed.
+        setMstockPassword("");
+        setMstockTotp("");
+      } else {
+        setMstockConnectError(res.error || `Connect failed (HTTP ${r.status})`);
+      }
+    } catch {
+      setMstockConnectError("Could not reach the backend — is backend/app.py running?");
+    } finally {
+      setMstockConnecting(false);
+    }
+  };
+
+  const disconnectMstock = async () => {
+    await postJSON("/api/broker/mstock/disconnect").catch(() => null);
+    setBrokerStatus((prev) => ({ ...(prev || { connected: false }), mstock: { connected: false } }));
   };
 
   const runBacktest = async () => {
@@ -97,9 +146,9 @@ export default function SettingsPage() {
         <div className="t-panel p-5 mb-4">
           <div className="flex items-center justify-between mb-1">
             <h2 className="text-[12px] font-bold uppercase tracking-wider" style={{ color: '#c8cdd5' }}>AngelOne Connect</h2>
-            {brokerStatus?.connected ? (
+            {brokerStatus?.angelone?.connected ? (
               <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: '#00e87b' }}>
-                <PlugZap className="w-3.5 h-3.5" /> Connected{brokerStatus.client_code ? ` — ${brokerStatus.client_code}` : ""}
+                <PlugZap className="w-3.5 h-3.5" /> Connected{brokerStatus.angelone.client_code ? ` — ${brokerStatus.angelone.client_code}` : ""}
               </span>
             ) : (
               <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: '#5a6270' }}>
@@ -108,12 +157,13 @@ export default function SettingsPage() {
             )}
           </div>
           <p className="text-[10px] mb-4" style={{ color: '#5a6270' }}>
+            Powers all live market data (ticks, historical candles, instrument resolution) regardless of trade mode.
             Enter your client ID, PIN/password, and the current 6-digit code from your authenticator app.
             This goes straight to your own backend on localhost — never anywhere else. Nothing here is saved to disk;
             re-enter the TOTP code each time it expires.
           </p>
 
-          {brokerStatus?.connected ? (
+          {brokerStatus?.angelone?.connected ? (
             <button
               onClick={disconnectAngelOne}
               className="t-btn px-4 py-2 text-[10px] font-bold uppercase tracking-wider"
@@ -175,6 +225,97 @@ export default function SettingsPage() {
                 </button>
                 {connectError && (
                   <span className="text-[11px]" style={{ color: '#ff3e3e' }}>{connectError}</span>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* mStock Connect */}
+        <div className="t-panel p-5 mb-4">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-[12px] font-bold uppercase tracking-wider" style={{ color: '#c8cdd5' }}>
+              mStock Connect <span style={{ color: '#3d4450', fontWeight: 400 }}>— live trading broker</span>
+            </h2>
+            {brokerStatus?.mstock?.connected ? (
+              <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: '#00e87b' }}>
+                <PlugZap className="w-3.5 h-3.5" /> Connected{brokerStatus.mstock.user_id ? ` — ${brokerStatus.mstock.user_id}` : ""}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: '#5a6270' }}>
+                <Plug className="w-3.5 h-3.5" /> Not Connected
+              </span>
+            )}
+          </div>
+          <p className="text-[10px] mb-4" style={{ color: '#5a6270' }}>
+            The broker used for live order execution going forward (set <code>TRADE_MODE=mstock</code> in .env when
+            ready to leave paper trading). Enter your user ID, password, and the current 6-digit code from your
+            authenticator app. This goes straight to your own backend on localhost — never anywhere else. Nothing
+            here is saved to disk; re-enter the TOTP code each time it expires.
+          </p>
+
+          {brokerStatus?.mstock?.connected ? (
+            <button
+              onClick={disconnectMstock}
+              className="t-btn px-4 py-2 text-[10px] font-bold uppercase tracking-wider"
+              style={{ borderColor: '#ff3e3e', color: '#ff3e3e' }}
+            >
+              Disconnect
+            </button>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>User ID</label>
+                  <input
+                    value={mstockUserId}
+                    onChange={(e) => setMstockUserId(e.target.value)}
+                    autoComplete="off"
+                    className="w-full px-3 py-[6px] text-[12px]"
+                    style={{ background: '#0e1117', border: '1px solid #252a33', color: '#c8cdd5' }}
+                    placeholder="MA123456"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>Password</label>
+                  <input
+                    type="password"
+                    value={mstockPassword}
+                    onChange={(e) => setMstockPassword(e.target.value)}
+                    autoComplete="off"
+                    className="w-full px-3 py-[6px] text-[12px]"
+                    style={{ background: '#0e1117', border: '1px solid #252a33', color: '#c8cdd5' }}
+                    placeholder="••••"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider mb-1" style={{ color: '#5a6270' }}>TOTP Code</label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={mstockTotp}
+                    onChange={(e) => setMstockTotp(e.target.value.replace(/\D/g, ""))}
+                    onKeyDown={(e) => e.key === "Enter" && connectMstock()}
+                    autoComplete="off"
+                    className="w-full px-3 py-[6px] text-[12px] tracking-[3px]"
+                    style={{ background: '#0e1117', border: '1px solid #252a33', color: '#c8cdd5' }}
+                    placeholder="000000"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={connectMstock}
+                  disabled={mstockConnecting || !mstockUserId || !mstockPassword || mstockTotp.length !== 6}
+                  className="flex items-center gap-2 px-4 py-2 text-[10px] font-bold uppercase tracking-wider transition-all disabled:opacity-40"
+                  style={{ background: '#00e87b', color: '#000' }}
+                >
+                  <Plug className="w-3 h-3" />
+                  {mstockConnecting ? "Connecting…" : "Connect"}
+                </button>
+                {mstockConnectError && (
+                  <span className="text-[11px]" style={{ color: '#ff3e3e' }}>{mstockConnectError}</span>
                 )}
               </div>
             </>

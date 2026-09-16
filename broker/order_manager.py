@@ -34,6 +34,7 @@ from broker.base_adapter import (
 )
 from broker.paper_adapter import PaperAdapter
 from broker.angelone_adapter import AngelOneAdapter
+from broker.mstock_adapter import MStockAdapter
 from utils.logger import get_logger
 
 logger = get_logger("order_manager")
@@ -68,7 +69,7 @@ class OrderManager:
     Central execution coordinator.
 
     Config via env vars:
-      TRADE_MODE           — "paper" (default) or "angelone"
+      TRADE_MODE           — "paper" (default), "angelone", or "mstock"
       MAX_DAILY_LOSS       — max cumulative loss before auto-stop (default: -5000)
       MAX_CONCURRENT_POSITIONS — max open positions at once (default: 1)
       ORDER_CONFIRMATION   — "auto" (default) or "manual" (requires dashboard click)
@@ -94,6 +95,8 @@ class OrderManager:
             self._adapter: BrokerAdapter = adapter
         elif self._mode == "angelone":
             self._adapter: BrokerAdapter = AngelOneAdapter()
+        elif self._mode == "mstock":
+            self._adapter: BrokerAdapter = MStockAdapter()
         else:
             self._adapter: BrokerAdapter = PaperAdapter()
 

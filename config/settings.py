@@ -40,6 +40,22 @@ ANGEL_INSTRUMENT_MASTER_URL = (
 )
 ANGEL_WS_URL = "wss://smartapisocket.angelone.in/smart-stream"
 
+# ── mStock Trading API (Type A — Kite-Connect-shaped) ──────────────────────────
+# The broker going forward for live order execution once TRADE_MODE leaves
+# "paper" (see broker/mstock_adapter.py). Auth mirrors AngelOne's shape: user
+# ID + password live in .env, and the TOTP secret (base32, from enabling TOTP
+# at trade.mstock.com -> Hamburger Menu -> Key Products -> Trading APIs ->
+# Enable TOTP) computes the live 6-digit code at auth time via pyotp — no
+# browser/OAuth step. Never run the login yourself from chat — see
+# scripts/mstock_check_auth.py, which the user runs locally.
+# Install: pip install mStock-TradingApi-A
+MSTOCK_API_KEY = os.getenv("MSTOCK_API_KEY", "")
+MSTOCK_USER_ID = os.getenv("MSTOCK_USER_ID", "")
+MSTOCK_PASSWORD = os.getenv("MSTOCK_PASSWORD", "")
+MSTOCK_TOTP_SECRET = os.getenv("MSTOCK_TOTP_SECRET", "")
+
+MSTOCK_WS_URL = "wss://ws.mstock.trade"
+
 # ── jugaad-data (free NSE/BSE EOD + index history) ─────────────────────────────
 # Used for EOD bhavcopy / index OHLC / F&O historical backfill — not a live
 # tick source. Live intraday ticks + minute candles come from AngelOne above.
