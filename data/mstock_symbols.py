@@ -128,6 +128,59 @@ class MStockSymbolResolver:
         self.load(mconnect=mconnect)
         return self._by_symbol.get(f"{exchange}:{symbol}")
 
+    def current_futures_symbol(self, underlying: str, mconnect=None) -> Optional[dict]:
+        """
+        Nearest-expiry FUT row for an index underlying — mirrors
+        AngelSymbolResolver.current_futures_symbol(). `instrument_type` value
+        ("FUT") and `expiry` format ("YYYY-MM-DD") follow Kite Connect's own
+        instrument-dump convention, not AngelOne's ("FUTIDX" / "DDMMMYYYY")
+        — unverified against a live mStock response, see module docstring.
+        """
+        self.load(mconnect=mconnect)
+        candidates = [
+            r for r in self._rows
+            if r.get("name") == underlying
+            and r.get("instrument_type") == "FUT"
+            and r.get("exchange") == "NFO"
+        ]
+        if not candidates:
+            return None
+
+        def _expiry(r):
+            try:
+                return datetime.strptime(r["expiry"], "%Y-%m-%d")
+            except (KeyError, ValueError, TypeError):
+                return datetime.max
+
+        candidates.sort(key=_expiry)
+        return candidates[0]
+
+    def option_symbol_for(
+        self, underlying: str, expiry, strike: float, opt_type: str,
+        exchange: str = "NFO", mconnect=None,
+    ) -> Optional[dict]:
+        """
+        Resolve an option contract by underlying/expiry/strike/CE|PE rather
+        than guessing mStock's tradingsymbol string — mirrors
+        AngelSymbolResolver.option_symbol_for(). Kite Connect's own
+        instrument dumps use "CE"/"PE" directly as `instrument_type` (unlike
+        AngelOne's "OPTIDX" + a symbol suffix) and store `expiry` as
+        "YYYY-MM-DD" with `strike` as the real price (not paise-scaled) —
+        unverified against a live mStock response, see module docstring.
+        """
+        self.load(mconnect=mconnect)
+        expiry_str = expiry.strftime("%Y-%m-%d")
+        opt_type = opt_type.upper()
+        for r in self._rows:
+            if (r.get("name") == underlying and r.get("instrument_type") == opt_type
+                    and r.get("expiry") == expiry_str and r.get("exchange") == exchange):
+                try:
+                    if abs(float(r.get("strike", -1)) - float(strike)) < 0.01:
+                        return r
+                except (TypeError, ValueError):
+                    continue
+        return None
+
 
 # Module-level singleton — mirrors data/angelone_symbols.py's resolver pattern.
 resolver = MStockSymbolResolver()
