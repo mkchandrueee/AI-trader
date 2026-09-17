@@ -2,8 +2,14 @@
 """
 Automated Tick Data Collector
 ─────────────────────────────
-Connects to AngelOne WebSocket at market open and collects tick data
-for NIFTY-I (futures) + ATM option strikes into TimescaleDB.
+Connects to mStock's WebSocket (primary) and AngelOne's (redundant) at
+market open and collects tick data for NIFTY-I (futures) + ATM option
+strikes into TimescaleDB. Both sources feed the same on_tick() handler —
+their ticks are normalized to an identical shape (see
+data/mstock_market_data.py's module docstring), so there is no merge or
+voting logic: both are ticks of the same real market, not two opinions to
+reconcile. Only one needs to connect successfully for the collector to
+run; if only one does, that's the sole source for the session.
 
 Designed to run unattended via cron/launchd:
   - Waits until 9:14 IST if started early
@@ -55,6 +61,7 @@ from config.settings import (
     MARKET_CLOSE_HOUR, MARKET_CLOSE_MINUTE,
 )
 from data.market_data_adapter import MarketDataAdapter
+from data.mstock_market_data import MStockMarketData
 from data.tick_collector import TickCollector
 from database.db import write_df, upsert_candles, read_sql, get_engine
 from utils.logger import get_logger
@@ -75,6 +82,7 @@ logger = get_logger("auto_collector")
 
 # ── Globals ──────────────────────────────────────────────────────────────────
 td: MarketDataAdapter = None
+md_mstock: MStockMarketData = None  # primary tick source, per user direction; td (AngelOne) runs alongside for redundancy
 collector: TickCollector = None
 candle_buffer: dict = {}   # symbol -> list of ticks for current minute
 last_minute: dict = {}     # symbol -> last completed minute timestamp
@@ -95,16 +103,23 @@ def signal_handler(signum, frame):
 
 
 def _atexit_cleanup():
-    """Ensure WebSocket is disconnected on exit to avoid 'User Already Connected'."""
+    """Ensure both WebSockets are disconnected on exit to avoid 'User Already Connected'."""
     global running
     running = False
     try:
         if td and hasattr(td, '_ws_connected') and td._ws_connected:
-            logger.info("atexit: disconnecting WebSocket...")
+            logger.info("atexit: disconnecting AngelOne WebSocket...")
             td.ws_stop_streaming()
             td.ws_disconnect()
     except Exception as e:
-        logger.debug(f"atexit cleanup error: {e}")
+        logger.debug(f"atexit cleanup error (AngelOne): {e}")
+    try:
+        if md_mstock and md_mstock.is_ws_connected:
+            logger.info("atexit: disconnecting mStock WebSocket...")
+            md_mstock.ws_stop_streaming()
+            md_mstock.ws_disconnect()
+    except Exception as e:
+        logger.debug(f"atexit cleanup error (mStock): {e}")
     # Clean up cache file
     try:
         LIVE_CACHE_FILE.unlink(missing_ok=True)
@@ -293,7 +308,7 @@ def flush_remaining_candles():
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    global td, collector, running, last_tick_received_time
+    global td, md_mstock, collector, running, last_tick_received_time
 
     parser = argparse.ArgumentParser(description="Automated tick collector")
     parser.add_argument("--test", action="store_true", help="Test connection only")
@@ -319,12 +334,32 @@ def main():
         logger.error(f"Database connection failed: {e}")
         return
 
-    # ── Initialize AngelOne ──────────────────────────────────────────────
+    # ── Initialize market data sources ───────────────────────────────────
+    # mStock is primary per user direction; AngelOne runs alongside for
+    # redundancy (both feed the same on_tick() handler — see module
+    # docstring's design note on why no merge/voting logic is needed: both
+    # are ticks of the same real market, not two opinions to reconcile).
+    # Neither is individually required to proceed — only that at least one
+    # connects — but if AngelOne's the only one, we've lost nothing versus
+    # today's behavior; if mStock's the only one, that's the new capability
+    # this adds.
+    md_mstock = MStockMarketData()
+    if md_mstock.authenticate():
+        logger.info("mStock market-data session authenticated (primary).")
+    else:
+        logger.warning("mStock authentication failed — continuing with AngelOne only. Check credentials.")
+        md_mstock = None
+
     td = MarketDataAdapter()
-    if not td.authenticate():
-        logger.error("AngelOne authentication failed. Check credentials.")
+    if td.authenticate():
+        logger.info("AngelOne authenticated.")
+    else:
+        logger.warning("AngelOne authentication failed.")
+        td = None
+
+    if md_mstock is None and td is None:
+        logger.error("Both mStock and AngelOne authentication failed. Exiting.")
         return
-    logger.info("AngelOne authenticated.")
 
     # ── Initialize tick collector ────────────────────────────────────────
     collector = TickCollector(buffer_size=200)
@@ -332,11 +367,13 @@ def main():
     if args.test:
         # Quick connection test
         logger.info("Testing WebSocket connection...")
-        if td.ws_connect():
-            logger.info("WebSocket connection successful!")
+        angel_ok = td.ws_connect() if td else False
+        if td:
             td.ws_disconnect()
-        else:
-            logger.error("WebSocket connection failed.")
+        mstock_ok = md_mstock.ws_connect() if md_mstock else False
+        if md_mstock:
+            md_mstock.ws_disconnect()
+        logger.info(f"AngelOne: {'OK' if angel_ok else 'FAILED/skipped'}, mStock: {'OK' if mstock_ok else 'FAILED/skipped'}")
         return
 
     # ── Wait for market open ─────────────────────────────────────────────
@@ -346,8 +383,13 @@ def main():
         return
 
     # ── Get current NIFTY price for option symbol selection ──────────────
+    # mStock first (primary), AngelOne as fallback, then last-known DB price.
     logger.info("Fetching current NIFTY price for option symbol selection...")
-    last_bars = td.fetch_last_n_bars("NIFTY-I", n=1, interval="1min")
+    last_bars = md_mstock.fetch_last_n_bars("NIFTY-I", n=1, interval="1min") if md_mstock else pd.DataFrame()
+    source = "mStock"
+    if last_bars.empty and td:
+        last_bars = td.fetch_last_n_bars("NIFTY-I", n=1, interval="1min")
+        source = "AngelOne"
     if not last_bars.empty:
         current_price = float(last_bars.iloc[-1]["close"])
     else:
@@ -357,7 +399,8 @@ def main():
             "ORDER BY timestamp DESC LIMIT 1"
         )
         current_price = float(db_price.iloc[0]["close"]) if not db_price.empty else 24000
-    logger.info(f"Current NIFTY price: {current_price:.1f}")
+        source = "DB fallback"
+    logger.info(f"Current NIFTY price: {current_price:.1f} (source: {source})")
 
     # ── Build subscription list ──────────────────────────────────────────
     subscribe_symbols = []
@@ -388,13 +431,30 @@ def main():
 
     logger.info(f"Subscribing to {len(subscribe_symbols)} symbols")
 
-    # ── Connect WebSocket ────────────────────────────────────────────────
-    if not td.ws_connect():
-        logger.error("WebSocket connection failed. Exiting.")
+    # ── Connect WebSockets ───────────────────────────────────────────────
+    # Both sources feed the identical combined_handler below — ticks are
+    # normalized to the same shape (see data/mstock_market_data.py's module
+    # docstring), so no source-specific branching or merge logic is needed.
+    # Only fatal if BOTH fail to connect (mirrors the dual-auth check above).
+    mstock_ws_ok = md_mstock.ws_connect() if md_mstock else False
+    if md_mstock and not mstock_ws_ok:
+        logger.warning("mStock WebSocket connection failed — continuing without it.")
+        md_mstock = None
+
+    angel_ws_ok = td.ws_connect() if td else False
+    if td and not angel_ws_ok:
+        logger.warning("AngelOne WebSocket connection failed — continuing without it.")
+        td = None
+
+    if md_mstock is None and td is None:
+        logger.error("Both WebSocket connections failed. Exiting.")
         return
 
     # Subscribe
-    td.ws_subscribe(subscribe_symbols)
+    if md_mstock:
+        md_mstock.ws_subscribe(subscribe_symbols)
+    if td:
+        td.ws_subscribe(subscribe_symbols)
 
     # Start streaming with our tick handler
     def combined_handler(tick):
@@ -402,7 +462,10 @@ def main():
         collector.on_tick(tick)
         on_tick(tick)
 
-    td.ws_start_streaming(combined_handler)
+    if md_mstock:
+        md_mstock.ws_start_streaming(combined_handler)
+    if td:
+        td.ws_start_streaming(combined_handler)
 
     # Start background thread to flush live price cache to disk every second
     cache_thread = threading.Thread(target=_flush_price_cache, daemon=True)
@@ -443,23 +506,31 @@ def main():
                             f"NIFTY ATM drifted {subscribed_atm} → {new_atm} "
                             f"(live={live_price:.1f}). Adding {len(to_add)} new symbols: {to_add}"
                         )
-                        td.ws_subscribe(to_add)
+                        if md_mstock:
+                            md_mstock.ws_subscribe(to_add)
+                        if td:
+                            td.ws_subscribe(to_add)
                         subscribed_symbols_set.update(to_add)
                         subscribed_atm = new_atm
             last_atm_check = time.time()
 
         # ── Watchdog: detect silent WebSocket stall ───────────────────────
-        # The _stream_loop in market_data_adapter handles auto-reconnect on exceptions.
-        # We just need to force-close the socket; _stream_loop will detect the error
-        # and reconnect + re-subscribe automatically.
+        # The _stream_loop in market_data_adapter handles auto-reconnect on
+        # exceptions for AngelOne — we just need to force-close its socket;
+        # _stream_loop will detect the error and reconnect + re-subscribe
+        # automatically. mStock's MTicker has its own built-in auto-reconnect
+        # (up to 50 tries), so no equivalent manual action is needed for it
+        # here — this only force-closes AngelOne's socket. As long as EITHER
+        # source is delivering ticks this watchdog stays quiet, which is
+        # correct: no reconnect is needed if data is still flowing.
         secs_since_tick = time.time() - last_tick_received_time
         if secs_since_tick > WATCHDOG_TIMEOUT:
             logger.warning(
-                f"No ticks for {secs_since_tick:.0f}s — force-closing socket; "
-                "stream loop will auto-reconnect."
+                f"No ticks from either source for {secs_since_tick:.0f}s — "
+                "force-closing AngelOne's socket if present; stream loop will auto-reconnect."
             )
             try:
-                if td._ws:
+                if td and td._ws:
                     td._ws.close()
             except Exception as e:
                 logger.debug(f"Watchdog socket close error: {e}")
@@ -479,8 +550,12 @@ def main():
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("Market closed. Shutting down...")
 
-    td.ws_stop_streaming()
-    td.ws_disconnect()
+    if md_mstock:
+        md_mstock.ws_stop_streaming()
+        md_mstock.ws_disconnect()
+    if td:
+        td.ws_stop_streaming()
+        td.ws_disconnect()
 
     # Flush remaining data
     collector.flush()
