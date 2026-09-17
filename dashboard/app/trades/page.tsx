@@ -112,7 +112,14 @@ function LiveTradeRows({ trades }: { trades: LiveTrade[] }) {
                   border: `1px solid ${t.direction === "CALL" ? "#1a5c3a" : "#5c1a1a"}`,
                 }}>{t.direction}</span>
               </td>
-              <td style={{ color: "#5a6270" }}>{t.strategy?.replace(/_/g, " ")}</td>
+              <td
+                style={{ color: "#5a6270" }}
+                title={t.signal_id ? [
+                  `signal ${t.signal_id.slice(0, 8)}`,
+                  t.strategy_version ? `v${t.strategy_version}` : null,
+                  t.approval_id ? `approved ${t.approval_id.slice(0, 8)}` : null,
+                ].filter(Boolean).join(" · ") : undefined}
+              >{t.strategy?.replace(/_/g, " ")}</td>
               <td>₹{t.entry_premium.toFixed(1)}</td>
               <td>₹{(t.exit_premium ?? t.current_premium)?.toFixed(1) ?? "—"}</td>
               <td style={{ color: pnlColor, fontWeight: 600 }}>

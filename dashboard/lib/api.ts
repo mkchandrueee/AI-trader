@@ -172,6 +172,13 @@ export interface LiveTrade {
   // confidence-calibration report that made no sense until this surfaced).
   final_score?: number;
   candle_quality_confidence?: number;
+  // Lineage (Phase 4) — ties a trade back to the exact signal, and for
+  // live/assisted trades, the human approval that authorized it. Paper
+  // trades have signal_id + strategy_version but approval_id is null
+  // (nothing to approve in paper mode).
+  signal_id?: string | null;
+  approval_id?: string | null;
+  strategy_version?: string | null;
   realised_pnl: number | null;
   exit_reason: string | null;
   status: "OPEN" | "CLOSED";

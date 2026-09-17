@@ -32,6 +32,7 @@ import threading
 import time
 from datetime import date, datetime, time as dtime
 from typing import Optional
+from uuid import uuid4
 
 from strategy.premarket import SUPPORTED_SYMBOLS, live_confirmation
 from utils.logger import get_logger
@@ -244,7 +245,9 @@ def _live_premium(opt_symbol: str, exchange: str) -> Optional[float]:
 
 # ── Entry ────────────────────────────────────────────────────────────────────
 
-def _open_position(symbol: str, mode: str, decision: dict, *, approved: bool = False) -> Optional[dict]:
+def _open_position(
+    symbol: str, mode: str, decision: dict, *, approved: bool = False, approval_id: Optional[str] = None,
+) -> Optional[dict]:
     """
     Record a paper entry (or, once approved, a live one). `exit_target` is
     the engine's PARTIAL level, not its full target — the agent was
@@ -261,6 +264,12 @@ def _open_position(symbol: str, mode: str, decision: dict, *, approved: bool = F
     circuit breaker (Phase 2), not a "did a human look at this" gate.
     Defaults to False so any other/future caller that skips the approval
     flow entirely fails SAFE (blocked), not open.
+
+    `approval_id`, when set, is threaded through to the mirrored trade
+    record — AI-platform roadmap Phase 4's lineage requirement: a trade
+    approved through the queue should always be traceable back to the
+    exact ApprovalRequest (and hence the price/evidence snapshot it was
+    approved against), not just to "the agent fired this".
     """
     block_reason = _strategy_suspended()
     if not approved:
@@ -287,6 +296,15 @@ def _open_position(symbol: str, mode: str, decision: dict, *, approved: bool = F
         "tier": decision.get("tier"),
         "entry_time": datetime.now().isoformat(),
         "status": "OPEN",
+        # Lineage (Phase 4): every position gets a fresh signal_id whether
+        # it came via paper auto-fire or a live approval — "which exact
+        # decision instance produced this" should never depend on which
+        # mode happened to be active. approval_id is None outside the
+        # approval flow (paper mode, or a direct call with approved=True
+        # but no queue involved) rather than a fabricated placeholder.
+        "signal_id": str(uuid4()),
+        "approval_id": approval_id,
+        "strategy_version": STRATEGY_VERSION,
     }
     _state["open_positions"][symbol] = pos
     _mirror_open(pos)
@@ -468,7 +486,7 @@ def approve_request(approval_id: str) -> dict:
     with _lock:
         if req.symbol in _state["open_positions"]:
             return {"ok": False, "error": f"{req.symbol} already has an open position"}
-        pos = _open_position(req.symbol, req.mode, req.decision, approved=True)
+        pos = _open_position(req.symbol, req.mode, req.decision, approved=True, approval_id=req.approval_id)
 
     if pos is None:
         return {"ok": False, "error": "Blocked at open time (see agent log for reason)"}
@@ -507,6 +525,15 @@ def _close_position(pos: dict, exit_price: float, reason: str):
 AGENT_NAME = "intraday_agent"
 MODEL_NAME = "math_decision_engine"
 MODEL_LABEL = "Option Trade Decision Engine — Live"
+# Bumped by hand on any change to math_decision_strategy.analyse_option_pair()'s
+# rules (entry/partial/target/stop formula, side-selection thresholds) or to
+# this agent's own entry/exit logic — informal versioning (AI-platform
+# roadmap Phase 4/lineage; a full versioned-strategy-object registry is a
+# larger future step, see models/strategy_registry.py's own module
+# docstring for why this project's version of that spec section is
+# deliberately scoped down). Recorded on every position so a trade can
+# always be tied back to which version of the rules produced it.
+STRATEGY_VERSION = "1.0.0"
 
 # The shared paper book, handed over by backend/app.py at startup.
 #
@@ -584,6 +611,12 @@ def _mirror_open(pos: dict):
             # discovered only by digging into why that report's numbers
             # looked wrong. Give it its own honestly-named field instead.
             "candle_quality_confidence": (pos.get("confidence") or 0) / 100,
+            # Lineage (Phase 4): ties this journal row back to the exact
+            # signal and, for live/assisted trades, the human approval that
+            # authorized it — "why did the system do that" after the fact.
+            "signal_id": pos.get("signal_id"),
+            "approval_id": pos.get("approval_id"),
+            "strategy_version": pos.get("strategy_version"),
             "status": "OPEN",
             "entry_time": pos["entry_time"],
             "unrealised_pnl": 0,
