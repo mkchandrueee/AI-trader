@@ -38,6 +38,35 @@ from utils.logger import get_logger
 
 logger = get_logger("intraday_agent")
 
+
+def _live_autofire_blocked() -> Optional[str]:
+    """
+    Hard safety backstop — independent of, and enforced regardless of, the
+    module docstring's "PAPER ONLY" claim above. This agent has no human
+    approval step between a validated signal and opening a position (that
+    gate is planned but not yet built — see the project's AI-platform
+    roadmap, Phase 3: Approval Request object). Until it exists, the ONLY
+    thing standing between a signal and a real order is this check: it
+    refuses to open anything unless TRADE_MODE is "paper" (the default) OR
+    a second, deliberately alarming env var is ALSO set. This means
+    flipping TRADE_MODE alone — e.g. to test mStock order execution
+    elsewhere in the app — can never make this agent place a real,
+    unapproved order by accident; someone would have to deliberately set
+    a second flag with "LIVE_AUTOFIRE_CONFIRMED" in its name first.
+
+    Returns a human-readable block reason, or None if firing is allowed.
+    """
+    trade_mode = os.getenv("TRADE_MODE", "paper").lower()
+    if trade_mode == "paper":
+        return None
+    if os.getenv("INTRADAY_AGENT_LIVE_AUTOFIRE_CONFIRMED", "").strip().lower() in ("1", "true", "yes"):
+        return None
+    return (
+        f"TRADE_MODE={trade_mode!r} but this agent has no approval gate yet — "
+        f"refusing to auto-fire a real order. Set INTRADAY_AGENT_LIVE_AUTOFIRE_CONFIRMED=true "
+        f"only once an approval step actually exists."
+    )
+
 LIVE_CACHE_FILE = "/tmp/td_live_prices.json"
 
 # One entry check per symbol per this many seconds. The engine reads 5-minute
@@ -190,12 +219,23 @@ def _live_premium(opt_symbol: str, exchange: str) -> Optional[float]:
 
 # ── Entry ────────────────────────────────────────────────────────────────────
 
-def _open_position(symbol: str, mode: str, decision: dict) -> dict:
+def _open_position(symbol: str, mode: str, decision: dict) -> Optional[dict]:
     """
     Record a paper entry. `exit_target` is the engine's PARTIAL level, not its
     full target — the agent was specified to take one lot and close the whole
     thing there.
+
+    Re-checks _live_autofire_blocked() even though run_cycle() already did —
+    this is the actual position-mutating function, and defense-in-depth here
+    means any other/future caller can't bypass the safety backstop by
+    skipping run_cycle()'s check. Returns None (opens nothing) if blocked.
     """
+    block_reason = _live_autofire_blocked()
+    if block_reason:
+        _log(symbol, "BLOCKED", block_reason)
+        logger.error(f"[SAFETY] {symbol}: {block_reason}")
+        return None
+
     side = decision["side"]
     opt_symbol = decision["ce_symbol"] if side == "call" else decision["pe_symbol"]
     pos = {
@@ -234,6 +274,14 @@ def run_cycle() -> dict:
         armed = True
         open_syms = set(_state["open_positions"])
         opening_fired = set(_state.get("opening_fired", set()))
+
+    block_reason = _live_autofire_blocked()
+    if block_reason:
+        # Checked before even calling live_confirmation() — no point
+        # burning a broker API call on a signal this agent isn't allowed
+        # to act on anyway.
+        _log("-", "BLOCKED", block_reason)
+        return status()
 
     if not is_market_hours():
         return status()
