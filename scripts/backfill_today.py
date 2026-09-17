@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Backfill today's missing 1-min candles from the AngelOne REST API.
+Backfill today's missing 1-min candles (mStock primary, AngelOne fallback
+via MultiSourceMarketData -- see data/multi_source_market_data.py).
 Run this once to fill any gap caused by a late start or collector downtime.
 """
 import os
@@ -11,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from data.market_data_adapter import MarketDataAdapter
+from data.multi_source_market_data import MultiSourceMarketData
 from database.db import upsert_candles, read_sql
 from utils.logger import get_logger
 
@@ -23,9 +24,9 @@ def backfill_today():
     today_str = today.isoformat()
     print(f"Backfilling candles for {today_str}...")
 
-    td = MarketDataAdapter()
+    td = MultiSourceMarketData()
     if not td.authenticate():
-        print("ERROR: AngelOne authentication failed.")
+        print("ERROR: both mStock and AngelOne authentication failed.")
         return
 
     # Fetch all available symbols that should have data today

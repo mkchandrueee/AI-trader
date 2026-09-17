@@ -228,8 +228,23 @@ class _FetchRefused(Exception):
     """
 
 
-def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, session_date: Optional[date] = None,
-                         exchange: str = "NFO") -> Optional[dict]:
+def _fetch_candle_df(adapter, symbol: str, start: datetime, end: datetime, timeframe: str, exchange: str):
+    """One source's raw attempt -- returns (df, refused: bool, reason). Never
+    raises; the caller decides how a refusal from ONE source (of possibly
+    two, see _fetch_option_candle) should affect the overall result."""
+    try:
+        df = adapter.fetch_historical_bars(symbol, start, end, timeframe, exchange=exchange)
+    except Exception as e:
+        return None, True, str(e)
+    if df.empty and df.attrs.get("error"):
+        return None, True, df.attrs["error"]
+    return df, False, None
+
+
+def _fetch_option_candle(
+    adapter, opt_symbol: str, timeframe: str, mode: str, session_date: Optional[date] = None,
+    exchange: str = "NFO", mstock=None, mstock_symbol: Optional[str] = None,
+) -> Optional[dict]:
     """
     One OHLC candle for `opt_symbol` on `session_date` (default today): the
     fixed 09:15-09:20 opening candle (mode="opening", always 5-minute), or
@@ -238,6 +253,18 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
     (see math_decision_strategy). For a past session_date the whole day has
     already closed, so "latest" simply means that day's last candle, with
     no now-based cutoff.
+
+    `mstock`/`mstock_symbol`: when both are given, mStock is tried FIRST
+    (per the user's "mstock primary" direction) via `mstock_symbol` — the
+    DB-internal alias format (backtest.option_resolver.build_option_symbol),
+    since mStock's real tradingsymbol convention differs from AngelOne's
+    resolved `opt_symbol` and its own _resolve() already parses that alias
+    format directly. Falls back to `adapter` (AngelOne, using `opt_symbol`)
+    on any mStock failure or empty result — AngelOne's historical REST path
+    is the proven one; mStock's has not been exercised as long. Either
+    source refusing alone doesn't abort the walk-back in
+    _fetch_option_candle_with_fallback -- only both refusing does (a single
+    source's rate limit isn't a reason to give up on the other).
     """
     now = datetime.now()
     session_date = session_date or now.date()
@@ -246,23 +273,37 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
     if mode == "opening":
         start = datetime.combine(session_date, datetime.strptime(OPENING_WINDOW[0], "%H:%M").time())
         end = datetime.combine(session_date, datetime.strptime(OPENING_WINDOW[1], "%H:%M").time())
-        df = adapter.fetch_historical_bars(opt_symbol, start, end, "5min", exchange=exchange)
-        if df.empty:
-            if df.attrs.get("error"):
-                raise _FetchRefused(df.attrs["error"])
-            return None
+    else:
+        start = datetime.combine(session_date, datetime.strptime("09:15", "%H:%M").time())
+        end = now if is_today else datetime.combine(session_date, datetime.strptime("15:30", "%H:%M").time())
+    fetch_tf = "5min" if mode == "opening" else timeframe
+
+    refusals = []
+    df = None
+    source = None
+    if mstock is not None and mstock_symbol is not None:
+        df, refused, reason = _fetch_candle_df(mstock, mstock_symbol, start, end, fetch_tf, exchange)
+        if refused:
+            refusals.append(f"mstock: {reason}")
+        elif df is not None and not df.empty:
+            source = "mstock"
+    if df is None or df.empty:
+        df2, refused, reason = _fetch_candle_df(adapter, opt_symbol, start, end, fetch_tf, exchange)
+        if refused:
+            refusals.append(f"angelone: {reason}")
+        elif df2 is not None and not df2.empty:
+            df, source = df2, "angelone"
+
+    if df is None or df.empty:
+        if refusals:
+            raise _FetchRefused("; ".join(refusals))
+        return None  # genuinely no candle in this window on either source
+
+    if mode == "opening":
         row = df.iloc[0]
     else:
-        tf_minutes = TIMEFRAME_MINUTES.get(timeframe, 5)
-        market_open = datetime.combine(session_date, datetime.strptime("09:15", "%H:%M").time())
-        market_close = datetime.combine(session_date, datetime.strptime("15:30", "%H:%M").time())
-        end_bound = now if is_today else market_close
-        df = adapter.fetch_historical_bars(opt_symbol, market_open, end_bound, timeframe, exchange=exchange)
-        if df.empty:
-            if df.attrs.get("error"):
-                raise _FetchRefused(df.attrs["error"])
-            return None
         if is_today:
+            tf_minutes = TIMEFRAME_MINUTES.get(timeframe, 5)
             df = df[df["timestamp"] + timedelta(minutes=tf_minutes) <= now]
             if df.empty:
                 return None  # only the still-forming candle exists so far
@@ -271,12 +312,13 @@ def _fetch_option_candle(adapter, opt_symbol: str, timeframe: str, mode: str, se
     return {
         "timestamp": row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else str(row["timestamp"]),
         "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]), "close": float(row["close"]),
+        "source": source,
     }
 
 
 def _fetch_option_candle_with_fallback(
     adapter, opt_symbol: str, timeframe: str, mode: str, max_days: int = 7, exchange: str = "NFO",
-    today_only: bool = False,
+    today_only: bool = False, mstock=None, mstock_symbol: Optional[str] = None,
 ) -> tuple[Optional[dict], Optional[date], bool]:
     """
     Try today's session first; if the market is closed today (weekend,
@@ -297,7 +339,8 @@ def _fetch_option_candle_with_fallback(
         if i > 0:
             time.sleep(0.35)  # AngelOne historical REST: ~3 req/sec, same spacing as market_data_adapter.py
         try:
-            candle = _fetch_option_candle(adapter, opt_symbol, timeframe, mode, session_date=d, exchange=exchange)
+            candle = _fetch_option_candle(adapter, opt_symbol, timeframe, mode, session_date=d, exchange=exchange,
+                                           mstock=mstock, mstock_symbol=mstock_symbol)
         except _FetchRefused as e:
             logger.warning(f"{opt_symbol}: broker refused ({e}) — not walking back, the day may well have data")
             return None, None, False
@@ -317,6 +360,8 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     opening reading, or when the opening candle hasn't printed yet).
     """
     from data.market_data_adapter import MarketDataAdapter
+    from data.mstock_market_data import MStockMarketData
+    from backtest.option_resolver import build_option_symbol
 
     symbol = symbol.upper()
     if symbol not in _INDEX_CONFIG:
@@ -324,9 +369,19 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     if timeframe not in TIMEFRAME_MINUTES:
         return {"error": f"Unknown timeframe {timeframe!r}. Use one of {list(TIMEFRAME_MINUTES)}."}
 
+    # mStock tried first (per user direction), AngelOne is the proven
+    # fallback -- only fail the whole call if BOTH sessions are down, same
+    # "only one needs to connect" principle scripts/collect_ticks.py
+    # already applies to live ticks.
+    mstock = MStockMarketData()
+    mstock_ok = mstock.authenticate()
     adapter = MarketDataAdapter()
-    if not adapter.authenticate():
-        return {"error": "AngelOne is not connected — connect via the sidebar (needs a live session for option candles)."}
+    angelone_ok = adapter.authenticate()
+    if not mstock_ok and not angelone_ok:
+        return {"error": "Neither mStock nor AngelOne is connected — connect via the sidebar (needs a live session for option candles)."}
+    if not mstock_ok:
+        logger.warning(f"{symbol}: mStock session unavailable this call, relying on AngelOne alone")
+        mstock = None
 
     spot = _current_spot(symbol)
     if spot is None:
@@ -337,14 +392,23 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         return {"error": f"Could not resolve this week's ATM option contracts for {symbol}."}
 
     exch = resolved["exchange"]
+    # mStock's real tradingsymbol format differs from AngelOne's resolved
+    # ce_symbol/pe_symbol above -- its own _resolve() already parses the
+    # DB-internal alias format directly (backtest/option_resolver.py's
+    # build_option_symbol), so that's what gets passed for the mStock leg.
+    mstock_ce = build_option_symbol(resolved["expiry"], resolved["atm"], "CE")
+    mstock_pe = build_option_symbol(resolved["expiry"], resolved["atm"], "PE")
     ce_candle, ce_date, ce_live = _fetch_option_candle_with_fallback(
-        adapter, resolved["ce_symbol"], timeframe, mode, exchange=exch, today_only=today_only)
+        adapter, resolved["ce_symbol"], timeframe, mode, exchange=exch, today_only=today_only,
+        mstock=mstock, mstock_symbol=mstock_ce)
     pe_candle, pe_date, pe_live = _fetch_option_candle_with_fallback(
-        adapter, resolved["pe_symbol"], timeframe, mode, exchange=exch, today_only=today_only)
+        adapter, resolved["pe_symbol"], timeframe, mode, exchange=exch, today_only=today_only,
+        mstock=mstock, mstock_symbol=mstock_pe)
     if ce_candle is None or pe_candle is None:
         window = "09:15-09:20" if mode == "opening" else f"latest closed {timeframe}"
         scope = "today" if today_only else "the last 7 sessions"
         return {"error": f"No {window} candle available for {resolved['ce_symbol']}/{resolved['pe_symbol']} in {scope}."}
+    logger.info(f"{symbol} {mode}: CE from {ce_candle.get('source')}, PE from {pe_candle.get('source')}")
 
     # CE and PE fall back independently (see _fetch_option_candle_with_fallback);
     # in practice they land on the same session, but if they ever disagree,
@@ -369,8 +433,10 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         # fetch above fell back to a previous day, the opening reading must
         # come from that same day, not today's (possibly nonexistent) open.
         try:
-            opening_ce = _fetch_option_candle(adapter, resolved["ce_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch)
-            opening_pe = _fetch_option_candle(adapter, resolved["pe_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch)
+            opening_ce = _fetch_option_candle(adapter, resolved["ce_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch,
+                                               mstock=mstock, mstock_symbol=mstock_ce)
+            opening_pe = _fetch_option_candle(adapter, resolved["pe_symbol"], "5min", "opening", session_date=candle_session_date, exchange=exch,
+                                               mstock=mstock, mstock_symbol=mstock_pe)
         except _FetchRefused as e:
             # Only the cross-check against the open — the primary reading
             # above stands, so report it with the comparison unavailable

@@ -222,11 +222,34 @@ token, resolved via `data/mstock_symbols.py` from mStock's own
 `get_instruments()` (requires an authenticated session, unlike AngelOne's
 anonymous public dump).
 
-**Currently order-execution only** — set `TRADE_MODE=mstock` to route
-orders through it. AngelOne still powers 100% of market data (live ticks,
-historical candles, instrument master) regardless of `TRADE_MODE`; a
-dual-source market-data phase (mStock as an additional/redundant feed
-alongside AngelOne) is planned but not yet built.
+**Order execution**: set `TRADE_MODE=mstock` to route orders through it,
+independent of `TRADE_MODE`, market data is now dual-source, mStock
+primary / AngelOne fallback:
+- **Live WebSocket ticks**: `scripts/collect_ticks.py` connects both
+  `data/mstock_market_data.py`'s `MStockMarketData` (primary) and
+  `data/market_data_adapter.py`'s `MarketDataAdapter` (redundant) at
+  market open, feeding the same `on_tick()` handler — live-verified, real
+  ticks flowing from both.
+- **Historical option-candle fetches**: `data/multi_source_market_data.py`'s
+  `MultiSourceMarketData` is a drop-in replacement for `MarketDataAdapter`
+  (tries mStock first, falls back to AngelOne on any failure, tags
+  `df.attrs["source"]`) — used by the bulk backfill scripts
+  (`backfill_today.py`, `backfill_option_days.py`, `backfill_history.py`,
+  `fetch_missing_ticks.py`'s candle path). `strategy/premarket.py`'s
+  `_fetch_option_candle()` (the live agent's real-time decision path) has
+  its own equivalent dual-fetch, since it needs AngelOne's live-resolved
+  tradingsymbol for the AngelOne leg specifically (the DB-alias format
+  silently fails for today's freshest contracts there — see that
+  function's docstring) alongside mStock's DB-alias-resolved leg.
+- **Historical tick-level data**: neither broker has this endpoint
+  (AngelOne's free-tier gap; mStock doesn't even stub the method) —
+  `fetch_historical_ticks()` always returns empty on both sides.
+- **Symbol resolution for market data is broker-specific and NOT
+  interchangeable**: mStock's real tradingsymbol convention
+  (`NIFTY2692229450CE`, single-digit month code for weeklies) differs
+  from AngelOne's (`NIFTY08SEP2622100PE`) for the same contract — don't
+  pass one broker's resolved symbol string into the other's
+  `fetch_historical_bars()`.
 
 ---
 

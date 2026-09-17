@@ -19,19 +19,22 @@ MarketDataAdapter._parse_ws_tick() produces (symbol, price, volume, oi,
 bid_price, ask_price, timestamp), so collect_ticks.py's on_tick() handler
 needs no source-specific branching.
 
-IMPORTANT — confidence caveat: unlike broker/mstock_adapter.py (whose
-request-payload field names are lifted straight from the official SDK
-source AND live-tested against a real account this session), the
-instrument-master schema this file's symbol resolution depends on
-(instrument_token, tradingsymbol, name, expiry, strike, instrument_type,
-exchange) is inferred from Kite Connect's own documented conventions —
-mStock Type A mirrors Kite everywhere else confirmed so far, but this
-specific schema has NOT been seen in a real response. Same caveat for the
-WebSocket tick dict's exact field names (last_price, volume_traded,
-open_interest, depth.bid/depth.ask, last_traded_timestamp), taken from the
-mStock docs summary, not a live packet. Run scripts/mstock_market_data_check.py
-against a real account before trusting this for anything live, and correct
-the field names below (search for "VERIFY:") if they differ.
+IMPORTANT — confidence caveat: the instrument-master schema this file's
+symbol resolution depends on (instrument_token, tradingsymbol, name,
+expiry, strike, instrument_type, exchange) was confirmed directly against
+the real cached master (data/jugaad_cache/mstock_instrument_master.json,
+154,068 rows) — instrument_type is "CE"/"PE" directly, expiry is
+"YYYY-MM-DD", strike is a numeric-parseable string, instrument_token is a
+real field. What remains genuinely unverified: the actual
+get_historical_chart() REST response shape/behaviour (never exercised
+successfully against a live account — no confirming fix exists for it,
+unlike every other piece here, which all do), and the WebSocket tick
+dict's exact field names (last_price, volume_traded, open_interest,
+depth.bid/depth.ask, last_traded_timestamp) beyond what's already been
+live-confirmed (see the WS methods' own docstrings below for what's
+actually been proven). Run scripts/mstock_option_candle_check.py against
+a real account before trusting fetch_historical_bars() for anything live,
+and correct the field names below (search for "VERIFY:") if they differ.
 """
 
 from __future__ import annotations
@@ -61,6 +64,18 @@ _INTERVAL_MAP = {
     "10min": "10minute", "15min": "15minute", "30min": "30minute",
     "60min": "60minute", "day": "day",
 }
+
+
+def _failed_frame(reason) -> pd.DataFrame:
+    """Same convention as data/market_data_adapter.py's _failed_frame() --
+    an empty frame TAGGED as a failed request (rate limit, auth, upstream
+    error), distinct from a bare empty frame meaning "genuinely no candle
+    in this window." Callers (strategy/premarket.py's _FetchRefused
+    detection, data/multi_source_market_data.py's failover) check
+    df.attrs.get("error") to tell the two apart."""
+    df = pd.DataFrame()
+    df.attrs["error"] = str(reason) if reason else "request failed"
+    return df
 
 
 def _as_json(resp) -> dict:
@@ -177,13 +192,22 @@ class MStockMarketData:
             logger.error(f"Could not resolve mStock instrument token for {exchange}:{symbol}")
             return pd.DataFrame()
 
-        token = row.get("instrument_token")  # VERIFY: field name unconfirmed live
+        token = row.get("instrument_token")  # confirmed live against the cached instrument master
         try:
             resp = _as_json(self._mc.get_historical_chart(
                 exchange, str(token), _INTERVAL_MAP.get(interval, "minute"),
                 start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"),
             ))
-            rows = resp.get("data") or []
+            rows = resp.get("data")
+            if rows is None:
+                # Kite-style success envelopes always carry a "data" key
+                # (even an empty list); its absence means this is an error
+                # envelope ("message"/"error_type" instead) -- a refusal,
+                # not "no candle in this window". VERIFY: response shape
+                # unconfirmed live, see module docstring.
+                msg = resp.get("message") or resp.get("error_type") or "no data field in mStock response"
+                logger.error(f"mStock getHistoricalChart failed for {symbol}: {msg}")
+                return _failed_frame(msg)
             if not rows:
                 return pd.DataFrame()  # genuinely no candle in this window
 
@@ -199,7 +223,7 @@ class MStockMarketData:
 
         except Exception as e:
             logger.error(f"mStock historical fetch failed for {symbol}: {e}")
-            return pd.DataFrame()
+            return _failed_frame(e)
 
     def fetch_last_n_bars(
         self, symbol: str, n: int = 200, interval: str = "1min", exchange: str = "NFO",

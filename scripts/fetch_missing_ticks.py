@@ -1,10 +1,12 @@
 """
-Fetch missing tick and candle data for specific dates from AngelOne.
+Fetch missing tick and candle data for specific dates (candles: mStock
+primary, AngelOne fallback via MultiSourceMarketData).
 Usage: python scripts/fetch_missing_ticks.py --dates 2026-03-19 2026-03-20
 
-NOTE: AngelOne's free API has no historical tick-level endpoint (see the
-documented gap in data/market_data_adapter.py) — `fetch_ticks_for_date`
-will always return an empty DataFrame now. Candle backfill still works.
+NOTE: neither broker has a historical tick-level endpoint (AngelOne's
+free-tier gap is documented in data/market_data_adapter.py; mStock
+doesn't even stub the method) — `fetch_ticks_for_date` will always return
+an empty DataFrame now. Candle backfill still works.
 """
 import sys
 import os
@@ -13,14 +15,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 from datetime import datetime, date, timedelta
 import pandas as pd
-from data.market_data_adapter import MarketDataAdapter
+from data.multi_source_market_data import MultiSourceMarketData
 from database.db import get_engine, write_df, upsert_candles
 from utils.logger import get_logger
 
 logger = get_logger("fetch_missing_ticks")
 
 
-def fetch_ticks_for_date(td: MarketDataAdapter, symbol: str, target_date: date) -> pd.DataFrame:
+def fetch_ticks_for_date(td: MultiSourceMarketData, symbol: str, target_date: date) -> pd.DataFrame:
     """Fetch all ticks for a symbol on a specific date."""
     start_dt = datetime.combine(target_date, datetime.min.time().replace(hour=9, minute=15))
     end_dt = datetime.combine(target_date, datetime.min.time().replace(hour=15, minute=30))
@@ -50,7 +52,7 @@ def fetch_ticks_for_date(td: MarketDataAdapter, symbol: str, target_date: date) 
         return pd.DataFrame()
 
 
-def fetch_candles_for_date(td: MarketDataAdapter, symbol: str, target_date: date) -> pd.DataFrame:
+def fetch_candles_for_date(td: MultiSourceMarketData, symbol: str, target_date: date) -> pd.DataFrame:
     """Fetch 1-minute candles for a symbol on a specific date."""
     start_dt = datetime.combine(target_date, datetime.min.time().replace(hour=9, minute=15))
     end_dt = datetime.combine(target_date, datetime.min.time().replace(hour=15, minute=30))
@@ -168,8 +170,8 @@ def main():
     
     logger.info(f"Fetching data for {len(target_dates)} dates: {target_dates}")
     
-    # Initialize AngelOne/jugaad-data adapter
-    td = MarketDataAdapter()
+    # mStock primary, AngelOne fallback (data/multi_source_market_data.py)
+    td = MultiSourceMarketData()
     
     total_ticks = 0
     total_candles = 0
