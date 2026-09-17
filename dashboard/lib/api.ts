@@ -162,8 +162,16 @@ export interface LiveTrade {
   initial_sl: number;
   target: number;
   lot_size: number;
-  ml_prob: number;
-  final_score: number;
+  ml_prob?: number;
+  // Only one of these two is ever present on a given trade — never both,
+  // and never blend them. final_score is the XGBoost strategy pipeline's
+  // 0.5*ml_prob+0.3*flow+0.2*technical blend. candle_quality_confidence is
+  // the math_decision_engine agent's deterministic candle-shape grade —
+  // no ML, no historical calibration, a structurally different number
+  // that used to be mislabeled "final_score" (fixed after digging into a
+  // confidence-calibration report that made no sense until this surfaced).
+  final_score?: number;
+  candle_quality_confidence?: number;
   realised_pnl: number | null;
   exit_reason: string | null;
   status: "OPEN" | "CLOSED";

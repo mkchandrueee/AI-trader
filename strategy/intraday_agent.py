@@ -414,7 +414,19 @@ def _mirror_open(pos: dict):
             "sl": pos["stop"],
             "initial_sl": pos["stop"],
             "target": pos["exit_target"],
-            "final_score": (pos.get("confidence") or 0) / 100,
+            # Deliberately NOT "final_score" — that key means something
+            # structurally different everywhere else in this codebase
+            # (strategy/trade_scorer.py's 0.5*ml_prob + 0.3*flow +
+            # 0.2*technical XGBoost-driven blend). This agent's `confidence`
+            # is math_decision_strategy.analyse_option_pair()'s deterministic
+            # candle-quality grade (shape of the breakout candle — no ML, no
+            # historical calibration). Writing it under "final_score" let 94
+            # of this project's first 107 closed trades silently masquerade
+            # as the XGBoost score in every downstream analysis, including
+            # the confidence-calibration report (models/calibration.py) —
+            # discovered only by digging into why that report's numbers
+            # looked wrong. Give it its own honestly-named field instead.
+            "candle_quality_confidence": (pos.get("confidence") or 0) / 100,
             "status": "OPEN",
             "entry_time": pos["entry_time"],
             "unrealised_pnl": 0,

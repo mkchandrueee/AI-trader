@@ -126,7 +126,17 @@ function LiveTradeRows({ trades }: { trades: LiveTrade[] }) {
                   border: `1px solid ${t.exit_reason === "TARGET_HIT" ? "#1a5c3a" : t.exit_reason === "SL_HIT" || t.exit_reason === "TRAILING_SL" ? "#5c1a1a" : "#333a45"}`,
                 }}>{t.exit_reason ?? "OPEN"}</span>
               </td>
-              <td style={{ color: "#5a6270" }}>{(t.final_score * 100).toFixed(0)}%</td>
+              <td>
+                {t.final_score !== undefined ? (
+                  <span style={{ color: "#5a6270" }}>{(t.final_score * 100).toFixed(0)}%</span>
+                ) : t.candle_quality_confidence !== undefined ? (
+                  <span style={{ color: "#8b7cf6" }} title="Candle-quality grade (math_decision_engine) — a shape heuristic, not the ML-blended score, and not a win probability">
+                    CQ {(t.candle_quality_confidence * 100).toFixed(0)}%
+                  </span>
+                ) : (
+                  <span style={{ color: "#3d4450" }}>—</span>
+                )}
+              </td>
               <td>
                 <button
                   onClick={() => toggleJourney(t)}
