@@ -87,6 +87,21 @@ export interface LiveState {
   auto_trade_enabled?: boolean;
 }
 
+/**
+ * A strategy's actual historical performance, read off its saved model file
+ * (see backend/app.py's _strategy_track_record()) — separate from
+ * ml_prob/strat_prob/flow_score/final_score below, which are all this bar's
+ * live setup-quality reading, not a track record. Deliberately never
+ * blended into one number: "does this strategy generally work" and "does
+ * today's setup look good" are different questions.
+ */
+export interface StrategyTrackRecord {
+  auc_roc: number | null;
+  n_samples: number | null;
+  trained_at: string | null;
+  sufficient_sample: boolean;
+}
+
 export interface TradeSuggestion {
   time: string;
   symbol: string;
@@ -102,6 +117,7 @@ export interface TradeSuggestion {
   strat_prob: number;
   flow_score: number;
   final_score: number;
+  strategy_track_record?: StrategyTrackRecord | null;
   regime: string;
   index_price: number;
   lots?: number;

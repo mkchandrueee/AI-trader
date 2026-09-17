@@ -1263,6 +1263,7 @@ def scan_market():
                         existing["index_price"] = round(latest.get("close", 0), 1)
                         existing["ml_prob"] = round(ml_prob, 4)
                         existing["final_score"] = round(final_score, 4)
+                        existing["strategy_track_record"] = _strategy_track_record(sig.strategy)
                         existing["risk_label"] = risk_label
                         existing["lots"] = _lots_for_score(final_score)
                         if opt_ltp:
@@ -1290,6 +1291,12 @@ def scan_market():
                 "strat_prob": round(strat_prob, 4),
                 "flow_score": round(flow_score, 2),
                 "final_score": round(final_score, 4),
+                # Decomposed confidence (AI-platform roadmap Phase 1): the
+                # numbers above (ml_prob/strat_prob/flow_score/final_score)
+                # are all THIS BAR's live setup-quality reading. This is the
+                # separate, historical "has this strategy actually worked"
+                # number — never blend the two into one display value.
+                "strategy_track_record": _strategy_track_record(sig.strategy),
                 "risk_label": risk_label,
                 "regime": regime.value,
                 "index_price": round(latest.get("close", 0), 1),
@@ -2788,6 +2795,46 @@ def api_risk_profiles():
         return jsonify({"error": str(e)}), 500
 
 
+_strategy_track_record_cache: dict = {}  # strategy_name -> (loaded_at, record)
+_TRACK_RECORD_CACHE_TTL = 300  # 5 min — these only change after a manual retrain
+
+
+def _strategy_track_record(strategy_name: str) -> dict:
+    """
+    Real historical performance for a strategy, read off its saved model
+    file via _describe_model_file() below — the SAME function the AI Models
+    page uses, so a trade suggestion's track record can never diverge from
+    what that page reports for the same strategy.
+
+    This is the "strategy prior" half of a decomposed confidence reading:
+    distinct from ml_prob/strat_prob/flow_score on the trade dict below,
+    which are all THIS BAR's live reading, not a historical track record.
+    Previously the dashboard only ever showed one blended `final_score` —
+    styled as if it were a single win-probability number, which conflates
+    "does this strategy generally work" with "does today's setup look
+    good", exactly the anti-pattern this field exists to stop.
+    """
+    now = time.time()
+    cached = _strategy_track_record_cache.get(strategy_name)
+    if cached and now - cached[0] < _TRACK_RECORD_CACHE_TTL:
+        return cached[1]
+    path = Path(__file__).resolve().parent.parent / "models" / "saved" / "strategy" / f"{strategy_name}_model.pkl"
+    info = _describe_model_file(path)
+    metrics = info.get("metrics") or {}
+    n_samples = info.get("n_samples")
+    record = {
+        "auc_roc": metrics.get("auc_roc"),
+        "n_samples": n_samples,
+        "trained_at": info.get("trained_at") or info.get("modified"),
+        # Below this, an AUC/sample-size reading is closer to noise than
+        # signal — the UI should say "insufficient sample" rather than
+        # render a number that looks precise but isn't reliable.
+        "sufficient_sample": bool(n_samples and n_samples >= 200),
+    }
+    _strategy_track_record_cache[strategy_name] = (now, record)
+    return record
+
+
 def _describe_model_file(path: Path) -> dict:
     """
     Real metadata for one saved model, read off the file itself. The AI Models
@@ -3532,6 +3579,29 @@ def api_broker_mstock_disconnect():
     """Drop the current mStock session — dashboard 'Disconnect' action."""
     mstock_adapter.disconnect()
     return jsonify({"connected": False})
+
+
+@app.route("/api/broker/mstock/positions")
+def api_broker_mstock_positions():
+    """
+    Real open positions from the connected mStock account — read-only,
+    queries the SAME session the Connect card established (mstock_adapter
+    above), regardless of TRADE_MODE. Separate from /api/broker/status
+    (which reports on order_manager's active adapter — Paper while
+    TRADE_MODE=paper, even if mStock is connected here).
+    """
+    if not mstock_adapter.is_connected:
+        return jsonify({"error": "mStock not connected"}), 400
+    positions = mstock_adapter.get_positions()
+    return jsonify([p.__dict__ for p in positions])
+
+
+@app.route("/api/broker/mstock/margins")
+def api_broker_mstock_margins():
+    """Real available funds/margin from the connected mStock account — read-only."""
+    if not mstock_adapter.is_connected:
+        return jsonify({"error": "mStock not connected"}), 400
+    return jsonify(mstock_adapter.get_margins())
 
 
 @app.route("/api/broker/kill", methods=["POST"])

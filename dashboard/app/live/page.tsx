@@ -456,7 +456,7 @@ export default function LivePage() {
               <table>
                 <thead>
                   <tr>
-                    {["Time", "Contract", "Dir", "Strategy", "Risk", "Entry ₹", "SL ₹", "Target ₹", "Lots", "Expiry", "ML%", "Score", "Regime", ""].map(h => (
+                    {["Time", "Contract", "Dir", "Strategy", "Risk", "Entry ₹", "SL ₹", "Target ₹", "Lots", "Expiry", "ML%", "Setup", "Track Record", "Regime", ""].map(h => (
                       <th key={h}>{h}</th>
                     ))}
                   </tr>
@@ -490,13 +490,32 @@ export default function LivePage() {
                         </td>
                         <td style={{ color: '#5a6270' }}>{t.expiry} ({t.dte}d)</td>
                         <td>{(t.ml_prob * 100).toFixed(0)}%</td>
-                        <td>
+                        <td title="Today's blended ML/flow/technical reading — NOT a win probability">
                           <div className="flex items-center gap-2">
                             <div className="h-1 w-14 overflow-hidden" style={{ background: '#1e222c' }}>
                               <div className="h-full" style={{ width: `${t.final_score * 100}%`, background: '#4da6ff' }} />
                             </div>
                             <span className="text-[10px]">{(t.final_score * 100).toFixed(0)}%</span>
                           </div>
+                        </td>
+                        <td style={{ fontSize: '10px' }} title="This strategy's own historical walk-forward AUC and sample size — separate from the Setup column, which is only today's reading">
+                          {t.strategy_track_record?.sufficient_sample ? (
+                            <span style={{ color: '#5a6270' }}>
+                              AUC{' '}
+                              <span style={{
+                                color: (t.strategy_track_record.auc_roc ?? 0) >= 0.7 ? '#00e87b'
+                                     : (t.strategy_track_record.auc_roc ?? 0) >= 0.6 ? '#e8c300' : '#ff3e3e',
+                                fontWeight: 600,
+                              }}>
+                                {t.strategy_track_record.auc_roc?.toFixed(2) ?? '—'}
+                              </span>
+                              {' '}· n={t.strategy_track_record.n_samples?.toLocaleString()}
+                            </span>
+                          ) : (
+                            <span style={{ color: '#3d4450' }}>
+                              {t.strategy_track_record ? `insufficient sample (n=${t.strategy_track_record.n_samples ?? 0})` : '—'}
+                            </span>
+                          )}
                         </td>
                         <td style={{ color: '#5a6270' }}>{t.regime}</td>
                         <td>
