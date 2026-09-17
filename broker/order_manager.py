@@ -409,10 +409,22 @@ class OrderManager:
 
     # ── Reconciliation ────────────────────────────────────────────────
 
-    def reconcile(self) -> dict:
+    def reconcile(self, auto_halt: bool = False) -> dict:
         """
         Compare our internal state vs the broker's actual positions.
         Returns discrepancies for manual review.
+
+        `auto_halt=True` (used by the periodic reconciliation job in
+        backend/app.py — see _reconciliation_loop() — never by the
+        on-demand /api/broker/reconcile route, which stays read-only) sets
+        the SAME _halted flag kill_switch()/max-daily-loss already use, on
+        any discrepancy. Per the platform spec: "do not silently overwrite
+        data — an unreconciled state halts automation." Reusing the
+        existing halt mechanism means this automatically blocks new
+        signals through submit_signal()'s existing halted-check — no
+        parallel halt system needed. Resuming requires the existing
+        resume() (a deliberate, logged action), matching "an unreconciled
+        state's resolution must be reviewable, not automatic."
         """
         broker_positions = self._adapter.get_positions()
         our_open = {p.symbol: p for p in self.open_positions}
@@ -456,10 +468,23 @@ class OrderManager:
             logger.warning(f"RECONCILIATION: {len(discrepancies)} discrepancy(ies)")
             for d in discrepancies:
                 logger.warning(f"  {d['type']}: {d['message']}")
+            if auto_halt and not self._halted:
+                with self._lock:
+                    self._halted = True
+                    self._halt_reason = (
+                        f"Reconciliation found {len(discrepancies)} discrepancy(ies) — "
+                        f"first: {discrepancies[0]['message']}"
+                    )
+                logger.warning(f"HALT: {self._halt_reason}")
         else:
             logger.debug("Reconciliation: all positions match")
 
-        return {"discrepancies": discrepancies, "our_open": len(our_open), "broker_open": len(broker_open)}
+        return {
+            "discrepancies": discrepancies,
+            "our_open": len(our_open),
+            "broker_open": len(broker_open),
+            "halted": self._halted,
+        }
 
     # ── State for dashboard ───────────────────────────────────────────
 

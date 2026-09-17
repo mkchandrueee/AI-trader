@@ -3881,6 +3881,37 @@ def _intraday_agent_loop():
         time.sleep(EXIT_CHECK_INTERVAL_SECS)
 
 
+RECONCILIATION_INTERVAL_SECS = 120
+
+
+def _reconciliation_loop():
+    """
+    Background thread (AI-platform roadmap Phase 4): periodically compares
+    order_manager's internal position state against the broker's actual
+    positions, and HALTS new signal submission on any discrepancy —
+    "do not silently overwrite data; an unreconciled state halts
+    automation." See broker/order_manager.py's reconcile(auto_halt=True)
+    for exactly what counts as a discrepancy (PHANTOM/ORPHAN/QTY_MISMATCH)
+    and how the halt reuses the existing kill-switch/max-daily-loss
+    mechanism rather than a parallel one.
+
+    Only runs meaningfully once TRADE_MODE leaves "paper" — PaperAdapter's
+    positions are order_manager's own internal book by construction, so
+    reconciling paper-mode against itself can never find anything and
+    would just be a periodic no-op. Checked on every loop (not just at
+    thread start) so flipping TRADE_MODE via a backend restart is picked
+    up without needing this thread's own restart logic.
+    """
+    logger.info("Reconciliation thread started.")
+    while True:
+        try:
+            if os.getenv("TRADE_MODE", "paper").lower() != "paper":
+                order_manager.reconcile(auto_halt=True)
+        except Exception as e:
+            logger.error(f"Reconciliation loop error: {e}")
+        time.sleep(RECONCILIATION_INTERVAL_SECS)
+
+
 # ── Delivery / Swing Agent (suggest-only; PAPER positions) ──────────────────
 
 # Kept separate from paper_positions_by_mode on purpose: that store is
@@ -4091,6 +4122,9 @@ if __name__ == "__main__":
     # Intraday math-engine agent — runs disarmed until explicitly armed via
     # POST /api/agent/intraday/arm, so this thread is inert on a fresh start.
     threading.Thread(target=_intraday_agent_loop, daemon=True, name="intraday-agent").start()
+
+    # Reconciliation — inert (checks TRADE_MODE every cycle) while paper.
+    threading.Thread(target=_reconciliation_loop, daemon=True, name="reconciliation").start()
 
     # Auto-start tick monitor and data collector during market hours
     _ensure_tick_monitor()
