@@ -357,20 +357,22 @@ class MStockMarketData:
         bid = self._num((bid_levels[0] or {}).get("price", price)) if bid_levels else price
         ask = self._num((ask_levels[0] or {}).get("price", price)) if ask_levels else price
 
-        ts = raw.get("last_traded_timestamp") or raw.get("exchange_timestamp")
-        if isinstance(ts, (int, float)):
-            ts = datetime.fromtimestamp(ts)
-        elif not isinstance(ts, datetime):
-            ts = datetime.now()
-
         return {
             "symbol": symbol,
             "price": price,
+            # mStock's own last_traded_timestamp/exchange_timestamp arrive
+            # as a "%Y-%m-%dT%I:%M:%S%p" string (confirmed live) — deliberately
+            # NOT parsed. MarketDataAdapter._parse_ws_tick() drops AngelOne's
+            # equivalent exchange timestamp the same way ("wall-clock kept
+            # for parity") because the rest of the pipeline (live price
+            # cache freshness checks, on_tick()'s minute-candle bucketing)
+            # is built around receipt time, not exchange time — matching
+            # that convention here rather than introducing a second one.
             "volume": self._num(raw.get("volume_traded", 0), kind=int),
             "oi": self._num(raw.get("open_interest", 0), kind=int),
             "bid_price": bid,
             "ask_price": ask,
-            "timestamp": ts,
+            "timestamp": datetime.now(),
         }
 
     def ws_stop_streaming(self):
