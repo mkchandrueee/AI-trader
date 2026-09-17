@@ -108,6 +108,11 @@ INTER_CALL_PAUSE_SECS = 1.0
 EOD_SQUAREOFF = dtime(15, 25)
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
+# Minimum analyse_option_pair()-computed reward:risk to take a trade at all
+# -- matches that function's own RR_BELOW_ONE warning threshold exactly,
+# just actually enforced here instead of only logged. See run_cycle()'s
+# entry gate for the evidence behind adding this.
+MIN_RR = 1.0
 
 MAX_LOG_ENTRIES = 200
 
@@ -374,6 +379,19 @@ def run_cycle() -> dict:
             if not decision.get("tradable"):
                 blockers = ", ".join(decision.get("blockers") or []) or "no clear side"
                 _log(symbol, "SKIP", f"{mode}: not tradable ({blockers})")
+                continue
+            # math_decision_strategy.analyse_option_pair() already computes
+            # `rr` (target_pts/risk) and appends an RR_BELOW_ONE warning when
+            # it's under 1.0, but that warning never actually blocked entry
+            # -- tradable only looks at blockers. A post-hoc read of 67 real
+            # closed trades found the agent exits the WHOLE lot at `partial`
+            # (not the further `target`), so its real captured R:R is about
+            # half of `rr`; the worst R:R trades (rr<0.3, the single largest
+            # bucket) lost the most net money despite the highest win rate.
+            # Enforcing the engine's own >=1.0 bar here is the minimum bar
+            # for taking a trade at all, not a new invented threshold.
+            if decision.get("rr") is not None and decision["rr"] < MIN_RR:
+                _log(symbol, "SKIP", f"{mode}: rr={decision['rr']:.2f} below MIN_RR={MIN_RR}")
                 continue
 
             with _lock:
