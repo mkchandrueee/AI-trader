@@ -34,7 +34,7 @@ Usage:
 """
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -76,8 +76,20 @@ def main():
         return 1
     print("Authenticated.\n")
 
-    start = datetime.now() - timedelta(hours=2)
-    end = datetime.now()
+    # Use TODAY'S actual market session (09:15-15:30 IST), not a blind
+    # "now minus N hours" -- outside market hours that window contains no
+    # trading at all, which both brokers correctly report as empty and
+    # was previously misread as a resolution failure. Cap the end at now
+    # so a same-day run before the close doesn't ask for future candles.
+    today = datetime.now().date()
+    session_start = datetime.combine(today, datetime.min.time().replace(hour=9, minute=15))
+    session_end = datetime.combine(today, datetime.min.time().replace(hour=15, minute=30))
+    start = session_start
+    end = min(datetime.now(), session_end)
+    if end <= start:
+        print("Market hasn't opened yet today -- nothing to compare. Run this during or after today's session.")
+        return 1
+    print(f"Comparing today's session window: {start} -> {end}\n")
 
     for label, angel_sym, mstock_sym in (("CE", resolved["ce_symbol"], mstock_ce),
                                           ("PE", resolved["pe_symbol"], mstock_pe)):
