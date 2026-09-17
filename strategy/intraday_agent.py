@@ -244,18 +244,27 @@ def _live_premium(opt_symbol: str, exchange: str) -> Optional[float]:
 
 # ── Entry ────────────────────────────────────────────────────────────────────
 
-def _open_position(symbol: str, mode: str, decision: dict) -> Optional[dict]:
+def _open_position(symbol: str, mode: str, decision: dict, *, approved: bool = False) -> Optional[dict]:
     """
-    Record a paper entry. `exit_target` is the engine's PARTIAL level, not its
-    full target — the agent was specified to take one lot and close the whole
-    thing there.
+    Record a paper entry (or, once approved, a live one). `exit_target` is
+    the engine's PARTIAL level, not its full target — the agent was
+    specified to take one lot and close the whole thing there.
 
-    Re-checks _live_autofire_blocked() even though run_cycle() already did —
-    this is the actual position-mutating function, and defense-in-depth here
-    means any other/future caller can't bypass the safety backstop by
-    skipping run_cycle()'s check. Returns None (opens nothing) if blocked.
+    `approved=True` is set ONLY by approve_request() below, after a human
+    has explicitly authorized this EXACT signal via the approval queue
+    (models/approval.py, Phase 3 of the AI-platform roadmap) — it bypasses
+    _live_autofire_blocked()'s blanket TRADE_MODE guard, since a specific,
+    re-validated human approval is exactly the authorization that guard
+    exists to stand in for until this existed. It does NOT bypass
+    _strategy_suspended() — an auto-suspended strategy stays suspended
+    regardless of who approved what; that's a separate, evidence-based
+    circuit breaker (Phase 2), not a "did a human look at this" gate.
+    Defaults to False so any other/future caller that skips the approval
+    flow entirely fails SAFE (blocked), not open.
     """
-    block_reason = _live_autofire_blocked() or _strategy_suspended()
+    block_reason = _strategy_suspended()
+    if not approved:
+        block_reason = _live_autofire_blocked() or block_reason
     if block_reason:
         _log(symbol, "BLOCKED", block_reason)
         logger.error(f"[SAFETY] {symbol}: {block_reason}")
@@ -300,11 +309,19 @@ def run_cycle() -> dict:
         open_syms = set(_state["open_positions"])
         opening_fired = set(_state.get("opening_fired", set()))
 
-    block_reason = _live_autofire_blocked() or _strategy_suspended()
+    # NOT _live_autofire_blocked() here anymore — that would block the
+    # whole cycle before ever reaching a tradable signal, which is exactly
+    # what Phase 3's approval queue replaces: in live mode, a tradable
+    # signal now STAGES an approval below instead of opening a position
+    # directly, so TRADE_MODE alone is no longer a reason to skip the
+    # whole cycle. _live_autofire_blocked() still applies inside
+    # _open_position() itself as the fallback for any call that skips
+    # staging entirely (approved=False by default there).
+    # _strategy_suspended() still short-circuits here — no point spending
+    # a broker API call on a signal from a strategy that can't act on it
+    # either way, paper or live.
+    block_reason = _strategy_suspended()
     if block_reason:
-        # Checked before even calling live_confirmation() — no point
-        # burning a broker API call on a signal this agent isn't allowed
-        # to act on anyway.
         _log("-", "BLOCKED", block_reason)
         return status()
 
@@ -344,12 +361,127 @@ def run_cycle() -> dict:
             with _lock:
                 if symbol in _state["open_positions"]:
                     break  # opened by the other mode in this same pass
-                _open_position(symbol, mode, decision)
+                # Paper mode auto-fires directly, same as always — it's not
+                # real money, and gating paper trading behind a human
+                # approval would just slow down the evidence-gathering this
+                # whole certification system depends on. Live mode STAGES
+                # an approval instead (Phase 3) — this is the actual point
+                # where Phase 0's blunt "refuse everything" backstop gets
+                # replaced by a real human-in-the-loop decision.
+                if os.getenv("TRADE_MODE", "paper").lower() == "paper":
+                    _open_position(symbol, mode, decision)
+                else:
+                    _stage_approval_for_signal(symbol, mode, decision)
                 if mode == "opening":
                     _state.setdefault("opening_fired", set()).add(symbol)
             break  # one entry per symbol per cycle
 
     return status()
+
+
+# ── Approval queue (Phase 3) ─────────────────────────────────────────────────
+# Live-mode replacement for auto-fire: a tradable signal stages a request
+# here instead of opening a position directly; a human approves or rejects
+# it via the routes in backend/app.py. See models/approval.py for the
+# full lifecycle (TTL, re-validation, price-tolerance voiding).
+
+def _strategy_key() -> str:
+    return f"{MODEL_NAME} ({AGENT_NAME})"
+
+
+def _current_evidence_snapshot() -> dict:
+    """Best-effort Performance Evidence Bundle for the human reviewing an
+    approval — not a safety check (that's _strategy_suspended()), just
+    context. Never blocks staging if this fails."""
+    try:
+        from pathlib import Path
+        from models.evidence_bundle import load_all_closed_trades, build_evidence_bundle
+        project_root = Path(__file__).resolve().parent.parent
+        by_strategy = load_all_closed_trades(project_root / "paper_trades")
+        trades = by_strategy.get(_strategy_key(), [])
+        return build_evidence_bundle(trades, basis="paper")
+    except Exception as e:
+        logger.debug(f"Evidence bundle snapshot failed (non-fatal): {e}")
+        return {}
+
+
+def _stage_approval_for_signal(symbol: str, mode: str, decision: dict):
+    from models import approval as approval_mod
+    req = approval_mod.stage(_strategy_key(), symbol, mode, decision, _current_evidence_snapshot())
+    opt_symbol = decision["ce_symbol"] if decision["side"] == "call" else decision["pe_symbol"]
+    _log(symbol, "STAGED_APPROVAL",
+         f"{decision['side'].upper()} {opt_symbol} @ {decision['entry']} -> exit {decision['partial']} / "
+         f"stop {decision['stop']} — awaiting approval (id={req.approval_id[:8]}, "
+         f"expires {req.expires_at.strftime('%H:%M:%S')})",
+         {"approval_id": req.approval_id})
+
+
+def list_pending_approvals() -> list[dict]:
+    from models import approval as approval_mod
+    return [
+        {
+            "approval_id": r.approval_id,
+            "strategy": r.strategy,
+            "symbol": r.symbol,
+            "side": r.decision["side"],
+            "option_symbol": r.decision["ce_symbol"] if r.decision["side"] == "call" else r.decision["pe_symbol"],
+            "entry": r.decision["entry"],
+            "stop": r.decision["stop"],
+            "target": r.decision["partial"],
+            "confidence": r.decision.get("confidence"),
+            "tier": r.decision.get("tier"),
+            "requested_at": r.requested_at.isoformat(),
+            "expires_at": r.expires_at.isoformat(),
+            "evidence_bundle": r.evidence_bundle,
+        }
+        for r in approval_mod.list_pending()
+    ]
+
+
+def approve_request(approval_id: str) -> dict:
+    """
+    Re-validates (price tolerance, strategy health, market hours — see
+    models/approval.py) and, only if all of that still holds, opens the
+    position for real. Returns {"ok": False, "error": ...} on any failure
+    — never raises, so a stale/invalid approval_id from a slow UI can't
+    crash the caller.
+    """
+    from models import approval as approval_mod
+
+    req = approval_mod.get(approval_id)
+    if req is None:
+        return {"ok": False, "error": "No such approval request"}
+
+    current_price = _live_premium(
+        req.decision["ce_symbol"] if req.decision["side"] == "call" else req.decision["pe_symbol"],
+        req.decision.get("exchange", "NFO"),
+    )
+    suspended = _strategy_suspended() is not None
+
+    approved_req, message = approval_mod.approve(
+        approval_id, current_price=current_price, strategy_suspended=suspended,
+        market_open=is_market_hours(),
+    )
+    if approved_req is None:
+        return {"ok": False, "error": message}
+
+    with _lock:
+        if req.symbol in _state["open_positions"]:
+            return {"ok": False, "error": f"{req.symbol} already has an open position"}
+        pos = _open_position(req.symbol, req.mode, req.decision, approved=True)
+
+    if pos is None:
+        return {"ok": False, "error": "Blocked at open time (see agent log for reason)"}
+    return {"ok": True, "position": _public(pos)}
+
+
+def reject_request(approval_id: str, reason: str = "") -> dict:
+    from models import approval as approval_mod
+    req = approval_mod.reject(approval_id, reason or "rejected by user")
+    if req is None:
+        return {"ok": False, "error": "No such pending approval request"}
+    _log(req.symbol, "REJECTED_APPROVAL", f"id={approval_id[:8]}: {req.resolution_reason}")
+    return {"ok": True}
 
 
 # ── Exit ─────────────────────────────────────────────────────────────────────
