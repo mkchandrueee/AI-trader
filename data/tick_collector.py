@@ -20,6 +20,29 @@ from utils.logger import get_logger
 logger = get_logger("tick_collector")
 
 
+def _sanitize_for_db(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    """
+    Replace NaN with real None before a DB write.
+
+    pandas silently upcasts a column to float64 the moment it contains a
+    mix of a real number and Python None (e.g. one tick's bid_qty=130,
+    another's bid_qty=None) — turning every None in that column into NaN.
+    Confirmed live, market-hours, 2026-09-17: once mStock started
+    delivering ticks alongside AngelOne (mStock's parser doesn't populate
+    bid_qty/ask_qty, so on_tick()'s setdefault fills None for those), any
+    buffer mixing a source that sets bid_qty with one that doesn't hit
+    this on every flush — upsert_candles() then handed psycopg2 a literal
+    float('nan') for a BIGINT column (bid_qty/ask_qty/oi/volume in
+    tick_data's schema), which Postgres rejects as
+    "NumericValueOutOfRange: bigint out of range". That failed the WHOLE
+    batch (up to `buffer_size` ticks), silently, for every flush — no
+    ticks were persisted at all from market open until this was fixed.
+    `.astype(object)` keeps real values as Python ints/floats (not forced
+    back to a uniform dtype) while letting None coexist in the same column.
+    """
+    return df[cols].astype(object).where(pd.notnull(df[cols]), None)
+
+
 class TickCollector:
     """Collects ticks and persists them, with optional in-memory buffer."""
 
@@ -70,6 +93,8 @@ class TickCollector:
             if c not in df.columns:
                 df[c] = None
 
+        df = _sanitize_for_db(df, cols)
+
         try:
             # ON CONFLICT DO NOTHING, not a bare append: two collector
             # processes racing on the same symbol (or a websocket resend)
@@ -119,6 +144,8 @@ class TickCollector:
         for c in cols:
             if c not in df.columns:
                 df[c] = None
+
+        df = _sanitize_for_db(df, cols)
 
         try:
             upsert_candles(df[cols], table="tick_data")

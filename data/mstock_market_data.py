@@ -354,8 +354,10 @@ class MStockMarketData:
         depth = raw.get("depth") or {}
         bid_levels = depth.get("bid") or []
         ask_levels = depth.get("ask") or []
-        bid = self._num((bid_levels[0] or {}).get("price", price)) if bid_levels else price
-        ask = self._num((ask_levels[0] or {}).get("price", price)) if ask_levels else price
+        bid_top = bid_levels[0] or {} if bid_levels else {}
+        ask_top = ask_levels[0] or {} if ask_levels else {}
+        bid = self._num(bid_top.get("price", price))
+        ask = self._num(ask_top.get("price", price))
 
         return {
             "symbol": symbol,
@@ -372,6 +374,19 @@ class MStockMarketData:
             "oi": self._num(raw.get("open_interest", 0), kind=int),
             "bid_price": bid,
             "ask_price": ask,
+            # Confirmed live in the depth packet's top-of-book level
+            # ("quantity" key, alongside "price"/"orders"/"padding") —
+            # previously omitted entirely, which was the actual trigger for
+            # a market-hours bug: AngelOne's parser always sets bid_qty/
+            # ask_qty, so a tick buffer mixing sources had this column as a
+            # mix of real ints and Python None. pandas silently upcasts
+            # that mix to NaN, and tick_data's bid_qty/ask_qty are BIGINT —
+            # Postgres rejected NaN as "out of range" on every flush,
+            # dropping the whole batch. Fixed defensively either way in
+            # data/tick_collector.py's flush(), but populating the real
+            # figure here is strictly better than leaving it None.
+            "bid_qty": self._num(bid_top.get("quantity", 0), kind=int),
+            "ask_qty": self._num(ask_top.get("quantity", 0), kind=int),
             "timestamp": datetime.now(),
         }
 
