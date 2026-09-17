@@ -67,6 +67,31 @@ def _live_autofire_blocked() -> Optional[str]:
         f"only once an approval step actually exists."
     )
 
+
+def _strategy_suspended() -> Optional[str]:
+    """
+    Health-based gate (AI-platform roadmap Phase 2: models/strategy_registry.py).
+    A strategy demoted to SUSPENDED — automatically, by
+    scripts/strategy_health_check.py finding it's measurably losing money
+    over a real sample — must not keep firing new signals, in paper mode
+    or otherwise: continuing just adds more losing trades without teaching
+    anything new, and leaves it sitting in a state that could get
+    re-promoted on stale evidence. Registry key must match the exact
+    `strategy` string this agent already tags every mirrored trade with
+    (MODEL_NAME + AGENT_NAME below), so the health check's per-strategy
+    breakdown and this gate are always looking at the same thing.
+
+    Returns a human-readable block reason, or None if firing is allowed.
+    Import is local to avoid a hard dependency for callers (e.g. tests)
+    that don't need the registry.
+    """
+    from models.strategy_registry import get_state, SUSPENDED
+    strategy_key = f"{MODEL_NAME} ({AGENT_NAME})"
+    if get_state(strategy_key) == SUSPENDED:
+        return f"strategy '{strategy_key}' is SUSPENDED (see models/strategy_registry.py) — refusing to fire"
+    return None
+
+
 LIVE_CACHE_FILE = "/tmp/td_live_prices.json"
 
 # One entry check per symbol per this many seconds. The engine reads 5-minute
@@ -230,7 +255,7 @@ def _open_position(symbol: str, mode: str, decision: dict) -> Optional[dict]:
     means any other/future caller can't bypass the safety backstop by
     skipping run_cycle()'s check. Returns None (opens nothing) if blocked.
     """
-    block_reason = _live_autofire_blocked()
+    block_reason = _live_autofire_blocked() or _strategy_suspended()
     if block_reason:
         _log(symbol, "BLOCKED", block_reason)
         logger.error(f"[SAFETY] {symbol}: {block_reason}")
@@ -275,7 +300,7 @@ def run_cycle() -> dict:
         open_syms = set(_state["open_positions"])
         opening_fired = set(_state.get("opening_fired", set()))
 
-    block_reason = _live_autofire_blocked()
+    block_reason = _live_autofire_blocked() or _strategy_suspended()
     if block_reason:
         # Checked before even calling live_confirmation() — no point
         # burning a broker API call on a signal this agent isn't allowed
