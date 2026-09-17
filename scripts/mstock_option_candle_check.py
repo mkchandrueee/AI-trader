@@ -42,9 +42,32 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from data.market_data_adapter import MarketDataAdapter
-from data.mstock_market_data import MStockMarketData
+from data.mstock_market_data import MStockMarketData, _as_json, _INTERVAL_MAP
 from backtest.option_resolver import build_option_symbol
 from strategy.premarket import _resolve_atm_symbols, _current_spot
+
+
+def _raw_diagnostic(mstock: MStockMarketData, symbol: str, start: datetime, end: datetime, exchange: str = "NFO"):
+    """Bypasses fetch_historical_bars()'s own parsing to show EXACTLY what
+    mStock's resolver and API returned -- distinguishes "resolved to the
+    wrong/no instrument" from "resolved correctly but the API genuinely has
+    no historical candles for this contract"."""
+    row = mstock._resolve(symbol, exchange)
+    if row is None:
+        print(f"  [diag] _resolve('{symbol}') -> None (symbol not found in mStock's instrument master)")
+        return
+    token = row.get("instrument_token")
+    print(f"  [diag] resolved row: tradingsymbol={row.get('tradingsymbol')} instrument_token={token} "
+          f"expiry={row.get('expiry')} strike={row.get('strike')} instrument_type={row.get('instrument_type')}")
+    try:
+        resp = _as_json(mstock._mc.get_historical_chart(
+            exchange, str(token), _INTERVAL_MAP.get("5min", "5minute"),
+            start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+        print(f"  [diag] raw get_historical_chart response keys: {list(resp.keys())}")
+        print(f"  [diag] raw response: {resp}")
+    except Exception as e:
+        print(f"  [diag] get_historical_chart raised: {e}")
 
 
 def main():
@@ -99,6 +122,7 @@ def main():
         if m_df.empty:
             reason = m_df.attrs.get("error")
             print(f"  EMPTY{f' — error: {reason}' if reason else ' — genuinely no candle in this window, or resolution failed silently'}")
+            _raw_diagnostic(mstock, mstock_sym, start, end)
         else:
             print(f"  {len(m_df)} rows")
             print(m_df.tail(5).to_string(index=False))
