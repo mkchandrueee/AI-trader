@@ -92,6 +92,29 @@ interface AgentStatus {
   symbols: string[];
 }
 
+interface PendingApproval {
+  approval_id: string;
+  strategy: string;
+  symbol: string;
+  side: string;
+  option_symbol: string;
+  entry: number;
+  stop: number;
+  target: number;
+  confidence: number | null;
+  tier: string | null;
+  requested_at: string;
+  expires_at: string;
+  evidence_bundle: {
+    n?: number;
+    sufficient_sample?: boolean;
+    win_rate?: number;
+    win_rate_ci95?: [number, number];
+    profit_factor?: number | null;
+    expectancy_pct?: number | null;
+  };
+}
+
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
   return res.json(); // read the body regardless of status — error payloads carry {error}
@@ -129,6 +152,10 @@ export default function PreMarketPage() {
   const [agent, setAgent] = useState<AgentStatus | null>(null);
   const [agentBusy, setAgentBusy] = useState(false);
 
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [approvalBusy, setApprovalBusy] = useState<string | null>(null); // approval_id currently being decided
+  const [now, setNow] = useState(() => Date.now()); // ticks the countdowns below
+
   // Poll the agent every 10s — it acts on its own schedule, so the panel has
   // to pull rather than only refreshing on user action.
   useEffect(() => {
@@ -143,6 +170,28 @@ export default function PreMarketPage() {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
+  // Pending approvals (AI-platform roadmap Phase 3) have a 120s TTL, so a
+  // faster poll than the agent's own status — a stale approval sitting
+  // unnoticed for 10s is a meaningfully worse experience than for a
+  // passive status panel.
+  useEffect(() => {
+    let alive = true;
+    const pull = () => {
+      getJSON<PendingApproval[]>("/api/agent/intraday/approvals")
+        .then((d) => { if (alive && Array.isArray(d)) setApprovals(d); })
+        .catch(() => {});
+    };
+    pull();
+    const id = setInterval(pull, 3_000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  // Local 1s ticker for the countdown display only — doesn't refetch.
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(id);
+  }, []);
+
   const toggleAgent = useCallback(async (armed: boolean) => {
     setAgentBusy(true);
     try {
@@ -150,6 +199,18 @@ export default function PreMarketPage() {
       if (d && typeof d.armed === "boolean") setAgent(d);
     } catch { /* status poll will resync */ }
     finally { setAgentBusy(false); }
+  }, []);
+
+  const decideApproval = useCallback(async (approvalId: string, action: "approve" | "reject") => {
+    setApprovalBusy(approvalId);
+    try {
+      await postJSONRaw(`/api/agent/intraday/approvals/${approvalId}/${action}`, {});
+    } catch { /* next poll will resync either way */ }
+    finally {
+      setApprovalBusy(null);
+      setApprovals((prev) => prev.filter((a) => a.approval_id !== approvalId));
+      getJSON<PendingApproval[]>("/api/agent/intraday/approvals").then(setApprovals).catch(() => {});
+    }
   }, []);
 
   const runNextday = useCallback(async (sym: string) => {
@@ -202,6 +263,77 @@ export default function PreMarketPage() {
               ATM candle, and checks whether it still agrees.
             </p>
           </div>
+
+          {/* Pending approvals (AI-platform roadmap Phase 3) — only ever
+              populated once TRADE_MODE leaves "paper"; empty in paper mode
+              since the agent auto-fires directly there. Placed above the
+              agent status panel deliberately: a decision waiting on a
+              120s TTL is more urgent than passive status. */}
+          {approvals.length > 0 && (
+            <div className="t-panel p-4 mb-5" style={{ borderColor: "#e8c300" }}>
+              <h2 className="text-[11px] font-semibold uppercase tracking-wider mb-3" style={{ color: "#e8c300" }}>
+                ⚠ Pending Approval{approvals.length > 1 ? "s" : ""} ({approvals.length})
+              </h2>
+              {approvals.map((a) => {
+                const secsLeft = Math.max(0, Math.round((new Date(a.expires_at).getTime() - now) / 1000));
+                const eb = a.evidence_bundle || {};
+                const busy = approvalBusy === a.approval_id;
+                return (
+                  <div key={a.approval_id} className="p-3 mb-2" style={{ background: "#181c24", border: "1px solid #3a3a1a" }}>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                      <div className="flex items-center gap-2">
+                        <span style={{ color: a.side === "call" ? "#00e87b" : "#ff3e3e", fontWeight: 700 }}>
+                          {a.side === "call" ? "BUY CE" : "BUY PE"}
+                        </span>
+                        <span style={{ fontWeight: 600 }}>{a.symbol}</span>
+                        <span style={{ color: "#5a6270" }}>{a.option_symbol}</span>
+                      </div>
+                      <span className="px-2 py-[2px] text-[9px] font-bold uppercase tracking-wider"
+                        style={{ background: secsLeft < 30 ? "#2a0a0a" : "#1a1a0a", color: secsLeft < 30 ? "#ff3e3e" : "#e8c300" }}>
+                        expires in {secsLeft}s
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-4 text-[10px] mb-2" style={{ color: "#5a6270" }}>
+                      <span>Entry <b style={{ color: "#c8cdd5" }}>₹{a.entry}</b></span>
+                      <span>Stop <b style={{ color: "#ff3e3e" }}>₹{a.stop}</b></span>
+                      <span>Target <b style={{ color: "#00e87b" }}>₹{a.target}</b></span>
+                      {a.confidence != null && <span>Confidence <b style={{ color: "#c8cdd5" }}>{a.confidence}%</b> ({a.tier})</span>}
+                    </div>
+                    {/* Performance Evidence Bundle snapshot — never a bare
+                        win rate; suppressed below the sample threshold
+                        rather than shown as a precise-looking guess. */}
+                    <div className="text-[10px] mb-3 p-2" style={{ background: "#0d0f14", color: "#5a6270" }}>
+                      <span style={{ color: "#3d4450", textTransform: "uppercase", letterSpacing: "0.05em" }}>Evidence: </span>
+                      {eb.sufficient_sample ? (
+                        <>
+                          win rate {((eb.win_rate ?? 0) * 100).toFixed(0)}%
+                          {eb.win_rate_ci95 && ` (95% CI ${(eb.win_rate_ci95[0]*100).toFixed(0)}–${(eb.win_rate_ci95[1]*100).toFixed(0)}%)`}
+                          {" · "}profit factor {eb.profit_factor != null ? eb.profit_factor.toFixed(2) : "undefined"}
+                          {" · "}n={eb.n} paper trades
+                        </>
+                      ) : (
+                        <span style={{ color: "#ff3e3e" }}>insufficient sample (n={eb.n ?? 0}) — no reliable track record yet</span>
+                      )}
+                    </div>
+                    {/* Reject and Approve carry equal visual weight — this
+                        is not a confirm-dialog with a de-emphasized cancel. */}
+                    <div className="flex gap-2">
+                      <button onClick={() => decideApproval(a.approval_id, "reject")} disabled={busy}
+                        className="flex-1 px-3 py-[6px] text-[11px] font-bold uppercase tracking-wider disabled:opacity-50"
+                        style={{ background: "#2a0a0a", border: "1px solid #5c1a1a", color: "#ff3e3e" }}>
+                        {busy ? "…" : "Reject"}
+                      </button>
+                      <button onClick={() => decideApproval(a.approval_id, "approve")} disabled={busy}
+                        className="flex-1 px-3 py-[6px] text-[11px] font-bold uppercase tracking-wider disabled:opacity-50"
+                        style={{ background: "#0a2a18", border: "1px solid #1a5c3a", color: "#00e87b" }}>
+                        {busy ? "…" : "Approve"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Intraday agent */}
           {agent && (

@@ -3826,6 +3826,39 @@ def api_agent_intraday_arm():
     return jsonify(arm(bool(body.get("armed", True))))
 
 
+@app.route("/api/agent/intraday/approvals")
+def api_agent_intraday_approvals():
+    """
+    Pending approval requests (AI-platform roadmap Phase 3) — only ever
+    populated once TRADE_MODE leaves "paper"; in paper mode the agent
+    auto-fires directly and this is always empty.
+    """
+    from strategy.intraday_agent import list_pending_approvals
+    return jsonify(list_pending_approvals())
+
+
+@app.route("/api/agent/intraday/approvals/<approval_id>/approve", methods=["POST"])
+def api_agent_intraday_approve(approval_id):
+    """
+    Re-validates (price tolerance, strategy health, market hours) and, only
+    if all of that still holds, opens the position for real. See
+    models/approval.py for exactly what can void an approval between
+    staging and this call.
+    """
+    from strategy.intraday_agent import approve_request
+    result = approve_request(approval_id)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/agent/intraday/approvals/<approval_id>/reject", methods=["POST"])
+def api_agent_intraday_reject(approval_id):
+    """POST {"reason": "..."} (optional) — reject a pending approval request."""
+    from strategy.intraday_agent import reject_request
+    body = request.get_json(silent=True) or {}
+    result = reject_request(approval_id, body.get("reason", ""))
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
 def _intraday_agent_loop():
     """
     Background thread: entry pass every ENTRY_INTERVAL_SECS, exit check every
