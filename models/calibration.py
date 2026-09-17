@@ -43,6 +43,12 @@ BUCKET_EDGES = [0.0, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 1.01]
 
 KNOWN_SCORE_FIELDS = ("final_score", "candle_quality_confidence")
 
+# Below this many closed trades, a "beats/misses no-skill" verdict is not
+# trustworthy — a handful of trades can flip it either way on pure luck.
+# Matches the platform spec's own minimum-evidence-threshold principle
+# (§58): don't report a verdict the sample can't actually support.
+MIN_SAMPLE_FOR_VERDICT = 30
+
 
 def _bucket_label(lo: float, hi: float) -> str:
     return f"{lo:.2f}-{min(hi, 1.0):.2f}"
@@ -117,6 +123,7 @@ def compute_calibration(trades: list[dict], score_field: str) -> dict:
         for t in trades
     ) / n_total
     base_rate = sum(1 for t in trades if (t.get("realised_pnl") or 0) > 0) / n_total
+    no_skill_brier = base_rate * (1 - base_rate)
 
     return {
         "score_field": score_field,
@@ -126,6 +133,54 @@ def compute_calibration(trades: list[dict], score_field: str) -> dict:
         # What a model with ZERO discrimination — always predicting the
         # base rate — would score. The real score doing worse than this
         # means it's actively misleading, not just imprecise.
-        "no_skill_brier": round(base_rate * (1 - base_rate), 4),
+        "no_skill_brier": round(no_skill_brier, 4),
+        # A "beats/misses no-skill" verdict isn't trustworthy below
+        # MIN_SAMPLE_FOR_VERDICT trades, and is meaningless outright when
+        # no_skill_brier is exactly 0 -- that only happens when every
+        # single trade in the sample won (or every one lost), which makes
+        # a "predict the base rate" baseline artificially perfect by
+        # definition, not because it's actually a strong baseline. Caught
+        # live: 5 brand-new candle_quality_confidence trades that all
+        # happened to win produced a "WORSE than no-skill" verdict that
+        # looked damning but was really just n=5 and a lucky streak.
+        "verdict_reliable": n_total >= MIN_SAMPLE_FOR_VERDICT and no_skill_brier > 0,
         "buckets": buckets,
     }
+
+
+def compute_direction_breakdown(trades: list[dict]) -> dict:
+    """
+    Win rate and average P&L% split by trade direction (CALL/PUT).
+
+    Added after digging into why candle_quality_confidence calibrated so
+    poorly on its first real sample: direction turned out to be a much
+    bigger driver of outcome than the score itself (CALL 33.3% vs PUT
+    59.2% win rate, avg P&L -2.4% vs +2.2% on the first 94 math_decision_engine
+    trades) — unsurprising once you consider the score only grades candle
+    *shape*, with no concept of market direction or regime at all. That
+    gap is invisible unless tracked separately, which is what this is for.
+
+    avg_pnl_pct is (exit_premium - entry_premium) / entry_premium, not raw
+    rupee P&L — necessary because different underlyings (NIFTY/BANKNIFTY/
+    SENSEX) have different lot sizes, so rupee P&L isn't comparable across
+    them but a percentage move in the option premium is.
+    """
+    breakdown = {}
+    for direction in ("CALL", "PUT"):
+        sub = [t for t in trades if t.get("direction") == direction]
+        n = len(sub)
+        if n == 0:
+            breakdown[direction] = {"n": 0, "win_rate": None, "avg_pnl_pct": None}
+            continue
+        wins = sum(1 for t in sub if (t.get("realised_pnl") or 0) > 0)
+        pnl_pcts = [
+            (t["exit_premium"] - t["entry_premium"]) / t["entry_premium"]
+            for t in sub
+            if t.get("entry_premium") and t.get("exit_premium") is not None
+        ]
+        breakdown[direction] = {
+            "n": n,
+            "win_rate": round(wins / n, 4),
+            "avg_pnl_pct": round(sum(pnl_pcts) / len(pnl_pcts), 4) if pnl_pcts else None,
+        }
+    return breakdown
