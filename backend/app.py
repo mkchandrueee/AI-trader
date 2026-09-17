@@ -2006,7 +2006,21 @@ def _tick_monitor_loop():
                 continue
 
             all_positions = paper_positions_by_mode.get("test", []) + paper_positions_by_mode.get("live", [])
-            open_positions = [p for p in all_positions if p["status"] == "OPEN"]
+            # Agent-mirrored positions (source == "agent", e.g.
+            # strategy/intraday_agent.py's math_decision_engine) run their
+            # OWN exit rule via check_exits() every EXIT_CHECK_INTERVAL_SECS
+            # (10s) -- deliberately NOT this loop's trailing-SL/breakeven
+            # machinery (see that module's docstring). Before this filter,
+            # this 1s loop was racing check_exits() on the very same mirror
+            # dict and winning almost every time, so agent trades were
+            # actually being exited by trailing-SL/breakeven logic they were
+            # never designed for -- then check_exits() ran ~10s later, found
+            # its own internal state still said "open" (nothing told it the
+            # position had already closed), and closed it AGAIN with a
+            # different exit price, writing a second, contradictory row to
+            # the trade journal. Found via 35 duplicate-trade rows (52% of
+            # all math_decision_engine trades) in paper_trades/trades_test.jsonl.
+            open_positions = [p for p in all_positions if p["status"] == "OPEN" and p.get("source") != "agent"]
             if not open_positions:
                 time.sleep(1)
                 continue
