@@ -25,16 +25,16 @@ expiry, strike, instrument_type, exchange) was confirmed directly against
 the real cached master (data/jugaad_cache/mstock_instrument_master.json,
 154,068 rows) — instrument_type is "CE"/"PE" directly, expiry is
 "YYYY-MM-DD", strike is a numeric-parseable string, instrument_token is a
-real field. What remains genuinely unverified: the actual
-get_historical_chart() REST response shape/behaviour (never exercised
-successfully against a live account — no confirming fix exists for it,
-unlike every other piece here, which all do), and the WebSocket tick
-dict's exact field names (last_price, volume_traded, open_interest,
-depth.bid/depth.ask, last_traded_timestamp) beyond what's already been
-live-confirmed (see the WS methods' own docstrings below for what's
-actually been proven). Run scripts/mstock_option_candle_check.py against
-a real account before trusting fetch_historical_bars() for anything live,
-and correct the field names below (search for "VERIFY:") if they differ.
+real field. get_historical_chart()'s response shape is now confirmed live
+too (scripts/mstock_option_candle_check.py against a real NIFTY option
+contract): {"status": "success", "data": {"candles": [[timestamp, open,
+high, low, close, volume], ...]}} — one level deeper than first assumed
+(candles nested inside "data", not "data" itself; the first live run
+silently returned zero rows because of this, with no error raised). What
+remains genuinely unverified: the WebSocket tick dict's exact field names
+(last_price, volume_traded, open_interest, depth.bid/depth.ask,
+last_traded_timestamp) beyond what's already been live-confirmed (see the
+WS methods' own docstrings below for what's actually been proven).
 """
 
 from __future__ import annotations
@@ -198,16 +198,17 @@ class MStockMarketData:
                 exchange, str(token), _INTERVAL_MAP.get(interval, "minute"),
                 start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"),
             ))
-            rows = resp.get("data")
-            if rows is None:
-                # Kite-style success envelopes always carry a "data" key
-                # (even an empty list); its absence means this is an error
-                # envelope ("message"/"error_type" instead) -- a refusal,
-                # not "no candle in this window". VERIFY: response shape
-                # unconfirmed live, see module docstring.
+            # Confirmed live (scripts/mstock_option_candle_check.py):
+            # {"status": "success", "data": {"candles": [[ts,o,h,l,c,vol], ...]}}
+            # -- one level deeper than first assumed (candles nested inside
+            # "data", not "data" itself). An error envelope has no "data"
+            # key at all ("message"/"error_type" instead).
+            data_obj = resp.get("data")
+            if data_obj is None:
                 msg = resp.get("message") or resp.get("error_type") or "no data field in mStock response"
                 logger.error(f"mStock getHistoricalChart failed for {symbol}: {msg}")
                 return _failed_frame(msg)
+            rows = data_obj.get("candles") if isinstance(data_obj, dict) else data_obj
             if not rows:
                 return pd.DataFrame()  # genuinely no candle in this window
 
