@@ -350,6 +350,33 @@ def _fetch_option_candle_with_fallback(
     return None, None, False
 
 
+_mstock_singleton = None  # see _get_mstock_client()
+
+
+def _get_mstock_client():
+    """
+    A cached, module-level MStockMarketData instance, reused across every
+    live_confirmation() call. Confirmed live 2026-09-18: constructing a
+    fresh MStockMarketData() per call (as this used to) forces a brand-new
+    TOTP login every ~30-60s (the agent's own cycle interval) since
+    authenticate()'s "already logged in" check lives on the instance, not
+    anywhere shared -- a new object always starts unauthenticated. That
+    was very likely kicking out scripts/collect_ticks.py's own already-
+    working mStock WebSocket session (mStock's docs/this project's own
+    check-script warnings already flag single-session-per-login
+    enforcement), producing a live tick-collector restart-thrashing loop
+    (every ~30s instead of running continuously for the whole session) and
+    611 mStock re-authentications in about 10 minutes. Reusing one
+    instance means authenticate() only actually logs in once, then reuses
+    that session on every subsequent call.
+    """
+    global _mstock_singleton
+    if _mstock_singleton is None:
+        from data.mstock_market_data import MStockMarketData
+        _mstock_singleton = MStockMarketData()
+    return _mstock_singleton
+
+
 def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str = "latest",
                       today_only: bool = False) -> dict:
     """
@@ -360,7 +387,6 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     opening reading, or when the opening candle hasn't printed yet).
     """
     from data.market_data_adapter import MarketDataAdapter
-    from data.mstock_market_data import MStockMarketData
     from backtest.option_resolver import build_option_symbol
 
     symbol = symbol.upper()
@@ -372,8 +398,9 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     # mStock tried first (per user direction), AngelOne is the proven
     # fallback -- only fail the whole call if BOTH sessions are down, same
     # "only one needs to connect" principle scripts/collect_ticks.py
-    # already applies to live ticks.
-    mstock = MStockMarketData()
+    # already applies to live ticks. mstock is a cached, reused instance
+    # (see _get_mstock_client()) -- NOT constructed fresh per call.
+    mstock = _get_mstock_client()
     mstock_ok = mstock.authenticate()
     adapter = MarketDataAdapter()
     angelone_ok = adapter.authenticate()
@@ -396,8 +423,19 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     # ce_symbol/pe_symbol above -- its own _resolve() already parses the
     # DB-internal alias format directly (backtest/option_resolver.py's
     # build_option_symbol), so that's what gets passed for the mStock leg.
-    mstock_ce = build_option_symbol(resolved["expiry"], resolved["atm"], "CE")
-    mstock_pe = build_option_symbol(resolved["expiry"], resolved["atm"], "PE")
+    # build_option_symbol() hardcodes an "NFO NIFTY" tradingsymbol prefix
+    # (it's NIFTY-only, same as get_nearest_expiry() -- see that module's
+    # own docstring), so calling it for BANKNIFTY/SENSEX produces a
+    # wrong-underlying symbol like "NIFTY26092956100CE" carrying
+    # BANKNIFTY's strike -- confirmed live 2026-09-18 as a stream of
+    # "Could not resolve mStock instrument token" errors. Only attempt the
+    # mStock leg for NIFTY; BANKNIFTY/SENSEX fall straight to AngelOne,
+    # unchanged from before this dual-source work.
+    if symbol == "NIFTY":
+        mstock_ce = build_option_symbol(resolved["expiry"], resolved["atm"], "CE")
+        mstock_pe = build_option_symbol(resolved["expiry"], resolved["atm"], "PE")
+    else:
+        mstock, mstock_ce, mstock_pe = None, None, None
     ce_candle, ce_date, ce_live = _fetch_option_candle_with_fallback(
         adapter, resolved["ce_symbol"], timeframe, mode, exchange=exch, today_only=today_only,
         mstock=mstock, mstock_symbol=mstock_ce)
