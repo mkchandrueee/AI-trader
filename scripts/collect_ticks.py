@@ -230,14 +230,35 @@ def aggregate_candle(symbol: str, ticks: list) -> dict:
 
 
 def _flush_price_cache():
-    """Write live_price_cache to disk every second for Flask to read."""
+    """
+    Write live_price_cache to disk every second for Flask to read.
+
+    Confirmed live 2026-09-18: on this Windows deployment, /tmp (resolving
+    to D:\\tmp, the current drive's root -- /tmp is a Unix convention with
+    no Windows equivalent) does not exist as a directory, so
+    tmp.write_text() raised FileNotFoundError on every single call,
+    silently swallowed by the bare except below. The file was NEVER
+    written, so backend/app.py's _cache_prices_are_fresh() always saw a
+    missing file and killed+restarted this (perfectly healthy) collector
+    every ~30 seconds via _ensure_collector() -- for the whole trading
+    day, every day, since this project moved off macOS (where /tmp
+    already exists). The resulting restart storm was severe enough today
+    to get AngelOne's API rate-limited ("Access denied because of
+    exceeding access rate"). Ensuring the parent directory exists fixes
+    this on both platforms without changing the path convention anything
+    else (backend/app.py, CLAUDE.md) already depends on.
+    """
+    try:
+        LIVE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.error(f"Could not create {LIVE_CACHE_FILE.parent} for the live price cache: {e}")
     while running:
         try:
             tmp = LIVE_CACHE_FILE.with_suffix(".tmp")
             tmp.write_text(json.dumps(live_price_cache))
             tmp.replace(LIVE_CACHE_FILE)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to write live price cache: {e}")
         time.sleep(1)
 
 
