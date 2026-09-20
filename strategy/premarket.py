@@ -32,7 +32,9 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from strategy.math_decision_strategy import analyse_option_pair, nextday_bias
+from strategy.math_decision_strategy import (
+    analyse_option_pair, analyzer_breakdown, nextday_bias, value_calculator,
+)
 from utils.logger import get_logger
 
 logger = get_logger("premarket")
@@ -455,10 +457,19 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     is_live = ce_live and pe_live
     candle_session_date = min(ce_date, pe_date) if not is_live else ce_date
 
-    decision = analyse_option_pair(
-        (ce_candle["open"], ce_candle["high"], ce_candle["low"], ce_candle["close"]),
-        (pe_candle["open"], pe_candle["high"], pe_candle["low"], pe_candle["close"]),
-    )
+    ce_ohlc = (ce_candle["open"], ce_candle["high"], ce_candle["low"], ce_candle["close"])
+    pe_ohlc = (pe_candle["open"], pe_candle["high"], pe_candle["low"], pe_candle["close"])
+    decision = analyse_option_pair(ce_ohlc, pe_ohlc)
+
+    # Reference-app "Options Analyzer" breakdown + "Value Calculator", auto-fed
+    # from the candles fetched above instead of typed in by hand. Display-only:
+    # nothing here feeds back into `decision` or the live agent.
+    analyzer = analyzer_breakdown(ce_ohlc, pe_ohlc)
+    cl, pl = analyzer["call_ladder"], analyzer["put_ladder"]
+    value_calc = value_calculator([
+        cl["entry"], cl["targets"][0]["level"], cl["targets"][1]["level"],
+        pl["entry"], pl["targets"][0]["level"], pl["targets"][1]["level"],
+    ])
 
     nextday = nextday_reading(symbol)
     nextday_side = {"bullish": "call", "bearish": "put"}.get(nextday.get("direction"))
@@ -505,4 +516,6 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         "opening_side": opening_side,
         "agrees_with_nextday": agrees_with_nextday,
         "agrees_with_opening": agrees_with_opening,
+        "analyzer": analyzer,
+        "value_calc": value_calc,
     }

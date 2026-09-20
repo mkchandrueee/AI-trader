@@ -284,6 +284,142 @@ def analyse_option_pair(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Options Analyzer breakdown + Value Calculator (reference "Trading Toolkit")
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Display-only: nothing here changes analyse_option_pair()'s decision, so the
+# live agent's trading logic is untouched. Ladder maths reuse analyse_side()
+# (entry = close x 1.005, T1/T2/T3 = entry + 1/2/3.5 steps, stop = low - 0.3 x
+# range) which reproduces the reference's published legs to the paisa. The
+# checklist thresholds come from the reference source's analyser.js
+# conditions() (body >= 60%, close position >= 60%, PCR <= 0.8 bullish /
+# >= 1.2 bearish). One deliberate difference from analyse_side(): the
+# checklist and strength bars treat close >= open as bullish, because the
+# reference app's newer release shows a flat 127->127 candle as BULLISH.
+
+ANALYZER_BODY_STRONG = 0.60
+ANALYZER_CLOSE_POS_STRONG = 0.60
+ANALYZER_PCR_BULLISH_MAX = 0.8
+ANALYZER_PCR_BEARISH_MIN = 1.2
+BOOK_PLAN = (("BOOK", 40), ("BOOK", 40), ("HOLD", 20))  # config.js bookT1Pct/bookT2Pct/holdT3Pct
+
+
+def _ladder(leg: LegAnalysis) -> dict:
+    targets = (leg.target1, leg.target2, leg.target3)
+    return {
+        "entry": leg.entry,
+        "targets": [
+            {"level": lvl, "pts": round(lvl - leg.entry), "action": BOOK_PLAN[i][0], "pct": BOOK_PLAN[i][1]}
+            for i, lvl in enumerate(targets)
+        ],
+        "stop_loss": leg.stop_loss,
+        "stop_pts": round(leg.entry - leg.stop_loss),
+    }
+
+
+def _display_strength(o: float, h: float, l: float, c: float) -> tuple[float, bool]:
+    """Directional-conviction % with close >= open counted as bullish (see above)."""
+    stats = candle_stats(o, h, l, c)
+    bullish = c >= o
+    toward = stats.close_pos if bullish else (1 - stats.close_pos)
+    return _clamp(100 * toward * (0.5 + stats.body_ratio * 0.5), 0, 100), bullish
+
+
+def analyzer_breakdown(
+    call_ohlc: tuple[float, float, float, float],
+    put_ohlc: tuple[float, float, float, float],
+    cfg: dict = None,
+    candle_closed: bool = True,
+) -> dict:
+    cfg = {**DEFAULT_CFG, **(cfg or {})}
+    ce = analyse_side(*call_ohlc, cfg)
+    pe = analyse_side(*put_ohlc, cfg)
+    sel = select_side(ce, pe, cfg)
+
+    call_strength, call_bull = _display_strength(*call_ohlc)
+    put_strength, put_bull = _display_strength(*put_ohlc)
+
+    ce_close, pe_close = call_ohlc[3], put_ohlc[3]
+    pcr = (pe_close / ce_close) if ce_close > 0 else None
+    if pcr is None:
+        pcr_bias = "unknown"
+    elif pcr >= ANALYZER_PCR_BEARISH_MIN:
+        pcr_bias = "bearish"
+    elif pcr <= ANALYZER_PCR_BULLISH_MAX:
+        pcr_bias = "bullish"
+    else:
+        pcr_bias = "neutral"
+
+    def row(key, label, state, value):
+        return {"key": key, "label": label, "state": state, "value": value}
+
+    checklist = [
+        row("closed", "Candle fully closed?", "pass" if candle_closed else "fail",
+            "CONFIRMED" if candle_closed else "STILL FORMING"),
+    ]
+    for name, ohlc, bull in (("Call", call_ohlc, call_bull), ("Put", put_ohlc, put_bull)):
+        checklist.append(row(f"{name.lower()}_direction", f"{name} candle direction ({ohlc[0]:.2f}→{ohlc[3]:.2f})",
+                             "pass" if bull else "fail", "BULLISH" if bull else "BEARISH"))
+    for name, leg in (("Call", ce), ("Put", pe)):
+        pct = leg.stats.body_ratio * 100
+        checklist.append(row(f"{name.lower()}_body", f"{name} body strength (≥{ANALYZER_BODY_STRONG*100:.0f}%)",
+                             "pass" if leg.stats.body_ratio >= ANALYZER_BODY_STRONG else "fail", f"{pct:.2f}%"))
+    for name, leg in (("Call", ce), ("Put", pe)):
+        pct = leg.stats.close_pos * 100
+        checklist.append(row(f"{name.lower()}_close_pos", f"{name} close position — near range top (≥{ANALYZER_CLOSE_POS_STRONG*100:.0f}%)",
+                             "pass" if leg.stats.close_pos >= ANALYZER_CLOSE_POS_STRONG else "fail", f"{pct:.2f}%"))
+    checklist.append(row(
+        "pcr", "PCR ratio (Put ÷ Call close)",
+        "skip" if pcr is None else ("warn" if pcr_bias == "neutral" else "pass"),
+        "n/a" if pcr is None else f"{pcr:.2f} → {pcr_bias.capitalize()}",
+    ))
+
+    return {
+        "scores": {
+            "call": round(sel.call_score), "put": round(sel.put_score),
+            "margin": round(sel.margin), "required_margin": cfg["sideMinMargin"],
+            "required_confidence": cfg["sideMinConfidence"],
+            "leader": sel.leader, "decision": sel.decision, "side": sel.side,
+        },
+        "strength": {
+            "call_pct": round(call_strength), "put_pct": round(put_strength),
+            "call_bullish": call_bull, "put_bullish": put_bull,
+        },
+        "pcr": None if pcr is None else round(pcr, 2), "pcr_bias": pcr_bias,
+        "checklist": checklist,
+        "call_ladder": _ladder(ce), "put_ladder": _ladder(pe),
+    }
+
+
+def value_calculator(values: list[float]) -> dict:
+    """
+    The reference app's Value Calculator: six premiums (call entry, call T1,
+    call T2, put entry, put T1, put T2) -> average -> its square root ->
+    CALL level = avg - sqrt(avg) -> CALL target +25% -> PUT level = CALL - 55%
+    -> PUT target +70%. Intermediates are NOT rounded between steps (the
+    reference's own 131.95 / 11.49 / 120.46 / 150.58 / 54.21 / 92.15 only
+    reproduces that way).
+    """
+    if len(values) != 6:
+        raise ValueError("value_calculator needs exactly 6 values")
+    if any(not (v == v) or v <= 0 for v in values):
+        raise ValueError("all six values must be positive numbers")
+    avg = sum(values) / 6
+    root = avg ** 0.5
+    call_level = avg - root
+    put_level = call_level * (1 - 0.55)
+    return {
+        "inputs": [round(v, 2) for v in values],
+        "average": _round2(avg),
+        "sqrt_of_avg": _round2(root),
+        "call_level": _round2(call_level),
+        "call_target": _round2(call_level * 1.25),
+        "put_level": _round2(put_level),
+        "put_target": _round2(put_level * 1.70),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # NextDay Direction Analyser (nextday.js) — classic floor pivots
 # ═══════════════════════════════════════════════════════════════════════════════
 

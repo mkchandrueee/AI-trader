@@ -22,6 +22,33 @@ interface NextDayReading {
   error?: string;
 }
 
+interface LadderTarget { level: number; pts: number; action: "BOOK" | "HOLD"; pct: number }
+interface Ladder { entry: number; targets: LadderTarget[]; stop_loss: number; stop_pts: number }
+interface ChecklistRow { key: string; label: string; state: "pass" | "fail" | "warn" | "skip"; value: string }
+interface AnalyzerBreakdown {
+  scores: {
+    call: number; put: number; margin: number;
+    required_margin: number; required_confidence: number;
+    leader: "call" | "put"; decision: "clear" | "tie" | "noEdge" | "insufficient"; side: "call" | "put" | null;
+  };
+  strength: { call_pct: number; put_pct: number; call_bullish: boolean; put_bullish: boolean };
+  pcr: number | null;
+  pcr_bias: string;
+  checklist: ChecklistRow[];
+  call_ladder: Ladder;
+  put_ladder: Ladder;
+}
+interface ValueCalc {
+  inputs: number[];
+  average: number;
+  sqrt_of_avg: number;
+  call_level: number;
+  call_target: number;
+  put_level: number;
+  put_target: number;
+  error?: string;
+}
+
 interface LiveConfirmation {
   symbol: string;
   timeframe: string;
@@ -52,6 +79,8 @@ interface LiveConfirmation {
   opening_side: "call" | "put" | null;
   agrees_with_nextday: boolean | null;
   agrees_with_opening: boolean | null;
+  analyzer: AnalyzerBreakdown;
+  value_calc: ValueCalc;
   error?: string;
 }
 
@@ -139,6 +168,82 @@ function AgreementChip({ label, value }: { label: string; value: boolean | null 
   );
 }
 
+const STATE_ICON: Record<ChecklistRow["state"], { icon: string; color: string }> = {
+  pass: { icon: "✓", color: "#00e87b" },
+  fail: { icon: "✕", color: "#ff3e3e" },
+  warn: { icon: "⚠", color: "#e8c300" },
+  skip: { icon: "·", color: "#5a6270" },
+};
+
+function LadderTable({ title, ladder, color }: { title: string; ladder: Ladder; color: string }) {
+  return (
+    <div className="p-3" style={{ background: "#181c24", border: `1px solid ${color}44` }}>
+      <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color }}>● {title}</div>
+      <table className="w-full text-[11px]">
+        <tbody>
+          <tr>
+            <td style={{ color: "#5a6270" }}>ENTRY</td>
+            <td className="text-right font-semibold" colSpan={3}>₹{ladder.entry.toFixed(2)}</td>
+          </tr>
+          {ladder.targets.map((t, i) => (
+            <tr key={i}>
+              <td style={{ color: "#5a6270" }}>TARGET {i + 1}</td>
+              <td className="text-right font-semibold" style={{ color: "#00e87b" }}>₹{t.level.toFixed(2)}</td>
+              <td className="text-right" style={{ color: "#3d4450" }}>+{t.pts}pts</td>
+              <td className="text-right">
+                <span className="px-1.5 py-[1px] text-[8px] font-bold uppercase tracking-wider"
+                  style={{ background: t.action === "BOOK" ? "#0a2a18" : "#1a1a2a", color: t.action === "BOOK" ? "#00e87b" : "#4da6ff",
+                           border: `1px solid ${t.action === "BOOK" ? "#1a5c3a" : "#252a5c"}` }}>
+                  {t.action} {t.pct}%
+                </span>
+              </td>
+            </tr>
+          ))}
+          <tr>
+            <td style={{ color: "#5a6270" }}>STOP LOSS</td>
+            <td className="text-right font-semibold" style={{ color: "#ff3e3e" }}>₹{ladder.stop_loss.toFixed(2)}</td>
+            <td className="text-right" style={{ color: "#3d4450" }}>−{ladder.stop_pts}pts</td>
+            <td className="text-right">
+              <span className="px-1.5 py-[1px] text-[8px] font-bold uppercase tracking-wider"
+                style={{ background: "#2a0a0a", color: "#ff3e3e", border: "1px solid #5c1a1a" }}>EXIT ALL</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function StrengthBar({ label, pct, bullish, color }: { label: string; pct: number; bullish: boolean; color: string }) {
+  return (
+    <div className="p-2" style={{ background: "#181c24", border: "1px solid #252a33" }}>
+      <div className="flex items-center justify-between text-[9px] uppercase tracking-wider mb-1">
+        <span style={{ color }}>{label}</span>
+        <span style={{ color: "#c8cdd5" }}>{bullish ? "Bullish" : "Bearish"} {pct}%</span>
+      </div>
+      <div style={{ height: 4, background: "#0d0f14" }}>
+        <div style={{ width: `${Math.min(100, Math.max(0, pct))}%`, height: 4, background: color }} />
+      </div>
+    </div>
+  );
+}
+
+function verdictText(a: AnalyzerBreakdown): { text: string; sub: string; color: string } {
+  const s = a.scores;
+  if (s.decision === "clear" && s.side) {
+    return {
+      text: `YES — BUY ${s.side === "call" ? "CALL" : "PUT"}`,
+      sub: `${s.side === "call" ? "Call" : "Put"} score ${s.side === "call" ? s.call : s.put}% leads by ${s.margin}% (needs ${s.required_margin}%+ gap and ${s.required_confidence}%+ score).`,
+      color: s.side === "call" ? "#00e87b" : "#ff3e3e",
+    };
+  }
+  const why =
+    s.decision === "tie" ? "Both legs scored the same — a tie never picks a side."
+    : s.decision === "noEdge" ? `Gap is only ${s.margin}% — need ${s.required_margin}%+ for entry.`
+    : `Leader score ${Math.max(s.call, s.put)}% is below the ${s.required_confidence}% floor.`;
+  return { text: "NO — WAIT", sub: `Call score ${s.call}% | Put score ${s.put}%. ${why} Conditions weak — check again after the next candle closes.`, color: "#e8c300" };
+}
+
 export default function PreMarketPage() {
   const [symbol, setSymbol] = useState("NIFTY");
   const [nextday, setNextday] = useState<NextDayReading | null>(null);
@@ -148,6 +253,14 @@ export default function PreMarketPage() {
   const [live, setLive] = useState<LiveConfirmation | null>(null);
   const [liveLoading, setLiveLoading] = useState<string | null>(null); // which button is loading
   const [liveError, setLiveError] = useState<string | null>(null);
+
+  // Value Calculator - auto-fed from the fetched candles (live.value_calc);
+  // the six inputs stay editable for what-if recalculation.
+  const [vcInputs, setVcInputs] = useState<string[]>([]);
+  const [vcResult, setVcResult] = useState<ValueCalc | null>(null);
+  const [vcBusy, setVcBusy] = useState(false);
+  const [vcError, setVcError] = useState<string | null>(null);
+  const [vcEdited, setVcEdited] = useState(false);
 
   const [agent, setAgent] = useState<AgentStatus | null>(null);
   const [agentBusy, setAgentBusy] = useState(false);
@@ -243,6 +356,30 @@ export default function PreMarketPage() {
       setLiveLoading(null);
     }
   }, [symbol]);
+
+  useEffect(() => {
+    if (live?.value_calc && !live.value_calc.error) {
+      setVcInputs(live.value_calc.inputs.map((v) => String(v)));
+      setVcResult(live.value_calc);
+      setVcEdited(false);
+      setVcError(null);
+    }
+  }, [live]);
+
+  const recalcValue = useCallback(async () => {
+    setVcBusy(true);
+    setVcError(null);
+    try {
+      const qs = vcInputs.map((v, i) => `v${i + 1}=${encodeURIComponent(v)}`).join("&");
+      const data = await getJSON<ValueCalc>(`/api/premarket/value-calc?${qs}`);
+      if (data.error) throw new Error(data.error);
+      setVcResult(data);
+    } catch (e) {
+      setVcError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setVcBusy(false);
+    }
+  }, [vcInputs]);
 
   const dirColor = (d: string | null) => (d === "bullish" ? "#00e87b" : d === "bearish" ? "#ff3e3e" : "#5a6270");
   const sideLabel = (s: string | null) => (s === "call" ? "BUY CALL" : s === "put" ? "BUY PUT" : "NO CLEAR SIDE");
@@ -574,6 +711,19 @@ export default function PreMarketPage() {
                   </span>
                 </div>
 
+                {live.analyzer && (
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <StrengthBar label="Call candle strength" pct={live.analyzer.strength.call_pct} bullish={live.analyzer.strength.call_bullish} color="#00e87b" />
+                    <StrengthBar label="Put candle strength" pct={live.analyzer.strength.put_pct} bullish={live.analyzer.strength.put_bullish} color="#ff3e3e" />
+                  </div>
+                )}
+                {live.side && (
+                  <p className="text-[10px] mb-3" style={{ color: "#5a6270" }}>
+                    Enter only when price crosses ₹{live.entry} (candle high + buffer). At the partial level ₹{live.partial} book
+                    part of the position and move the stop to cost; full target ₹{live.target}; structure stop ₹{live.stop}.
+                  </p>
+                )}
+
                 <div className="grid grid-cols-2 gap-3 text-[10px]">
                   <div>
                     <div className="uppercase tracking-wider mb-1" style={{ color: "#5a6270" }}>CE {live.ce_symbol}</div>
@@ -593,6 +743,115 @@ export default function PreMarketPage() {
                     {live.warnings.map((w) => (
                       <span key={w} className="px-2 py-[2px] text-[9px] uppercase tracking-wider" style={{ background: "#181c24", border: "1px solid #e8c300", color: "#e8c300" }}>{w}</span>
                     ))}
+                  </div>
+                )}
+
+                {/* Options Analyzer breakdown - the reference app's analyzer
+                    output, auto-fed from the same fetched candles (no manual
+                    entry of the 8 O/H/L/C values). Display-only. */}
+                {live.analyzer && (() => {
+                  const a = live.analyzer;
+                  const v = verdictText(a);
+                  return (
+                    <div className="mt-5 pt-4" style={{ borderTop: "1px solid #252a33" }}>
+                      <h3 className="text-[11px] font-bold uppercase tracking-wider mb-1 flex items-center gap-2" style={{ color: "#4da6ff" }}>
+                        Options Analyzer
+                        <span className="px-1.5 py-[1px] text-[8px] tracking-wider" style={{ background: "#0d1a2a", border: "1px solid #1a3a5c", color: "#4da6ff" }}>AUTO-FETCHED</span>
+                      </h3>
+                      <p className="text-[9px] mb-3" style={{ color: "#3d4450" }}>
+                        Candle-quality scores are the shape of one candle (direction 20 + body 40 + close position 40) — not a win probability.
+                      </p>
+
+                      <div className="p-3 mb-3 flex flex-wrap items-center justify-between gap-3" style={{ background: "#181c24", border: `1px solid ${v.color}` }}>
+                        <div>
+                          <div className="text-[15px] font-bold tracking-wider" style={{ color: v.color }}>{v.text}</div>
+                          <div className="text-[10px] mt-1 max-w-xl" style={{ color: "#5a6270" }}>{v.sub}</div>
+                        </div>
+                        <div className="flex gap-2">
+                          {([["Call", a.scores.call, "#00e87b"], ["Put", a.scores.put, "#ff3e3e"], ["Gap", a.scores.margin, "#c8cdd5"]] as [string, number, string][]).map(([l, n, c]) => (
+                            <div key={l} className="px-3 py-1 text-center" style={{ background: "#0d0f14", border: "1px solid #252a33" }}>
+                              <div className="text-[8px] uppercase tracking-wider" style={{ color: "#5a6270" }}>{l}</div>
+                              <div className="text-[15px] font-bold" style={{ color: c }}>{n}%</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: "#5a6270" }}>Entry conditions</div>
+                      <div className="mb-3" style={{ background: "#181c24", border: "1px solid #252a33" }}>
+                        {a.checklist.map((r) => {
+                          const st = STATE_ICON[r.state];
+                          return (
+                            <div key={r.key} className="flex items-center justify-between gap-3 px-3 py-[6px] text-[11px]" style={{ borderBottom: "1px solid #1d222b" }}>
+                              <span className="flex items-center gap-2">
+                                <span className="font-bold w-3 text-center" style={{ color: st.color }}>{st.icon}</span>
+                                <span style={{ color: "#c8cdd5" }}>{r.label}</span>
+                              </span>
+                              <span className="text-[10px] font-semibold" style={{ color: st.color }}>{r.value}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <LadderTable title="Call targets" ladder={a.call_ladder} color="#00e87b" />
+                        <LadderTable title="Put targets" ladder={a.put_ladder} color="#ff3e3e" />
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Value Calculator - auto-fed from the ladders above. */}
+                {vcResult && (
+                  <div className="mt-5 pt-4" style={{ borderTop: "1px solid #252a33" }}>
+                    <h3 className="text-[11px] font-bold uppercase tracking-wider mb-1 flex items-center gap-2" style={{ color: "#e8c300" }}>
+                      Value Calculator
+                      <span className="px-1.5 py-[1px] text-[8px] tracking-wider" style={{ background: "#1a1a0a", border: "1px solid #3a3a1a", color: "#e8c300" }}>
+                        {vcEdited ? "EDITED" : "AUTO-FED"}
+                      </span>
+                    </h3>
+                    <p className="text-[9px] mb-3" style={{ color: "#3d4450" }}>
+                      Six values from the Analyzer (call entry / T1 / T2, put entry / T1 / T2) → average → √avg → CALL level = avg − √avg → PUT = CALL − 55%.
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 mb-3">
+                      {["Call entry", "Call T1", "Call T2", "Put entry", "Put T1", "Put T2"].map((label, i) => (
+                        <div key={label}>
+                          <label className="block text-[8px] uppercase tracking-wider mb-1" style={{ color: "#5a6270" }}>Value {i + 1} ({label})</label>
+                          <input value={vcInputs[i] ?? ""} inputMode="decimal"
+                            onChange={(e) => { const next = [...vcInputs]; next[i] = e.target.value; setVcInputs(next); setVcEdited(true); }}
+                            className="w-full px-2 py-[5px] text-[12px]" style={{ background: "#0e1117", border: "1px solid #252a33", color: "#e8c300" }} />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      <button onClick={recalcValue} disabled={vcBusy}
+                        className="t-btn t-btn-green px-4 py-[6px] text-[11px] font-semibold uppercase tracking-wider disabled:opacity-50">
+                        {vcBusy ? "Calculating…" : "Recalculate"}
+                      </button>
+                      {vcEdited && live.value_calc && (
+                        <button onClick={() => { setVcInputs(live.value_calc.inputs.map((v) => String(v))); setVcResult(live.value_calc); setVcEdited(false); setVcError(null); }}
+                          className="px-3 py-[6px] text-[11px] font-semibold uppercase tracking-wider"
+                          style={{ background: "#181c24", border: "1px solid #252a33", color: "#c8cdd5" }}>
+                          Reset to auto-fed
+                        </button>
+                      )}
+                    </div>
+                    {vcError && <p className="text-[11px] mb-2" style={{ color: "#ff3e3e" }}>ERROR: {vcError}</p>}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {([
+                        ["Average (÷6)", vcResult.average, "#4da6ff"],
+                        ["Square root of avg", vcResult.sqrt_of_avg, "#4da6ff"],
+                        ["Call (avg − √avg)", vcResult.call_level, "#00e87b"],
+                        ["Call target (+25%)", vcResult.call_target, "#00e87b"],
+                        ["Put (call − 55%)", vcResult.put_level, "#ff3e3e"],
+                        ["Put target (+70%)", vcResult.put_target, "#ff3e3e"],
+                      ] as [string, number, string][]).map(([label, value, color]) => (
+                        <div key={label} className="p-2" style={{ background: "#181c24", border: "1px solid #252a33" }}>
+                          <div className="text-[8px] uppercase tracking-wider" style={{ color: "#5a6270" }}>{label}</div>
+                          <div className="text-[14px] font-semibold" style={{ color }}>₹{value.toFixed(2)}</div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>

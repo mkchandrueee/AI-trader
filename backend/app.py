@@ -3816,6 +3816,29 @@ def api_premarket_live():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/premarket/value-calc")
+def api_premarket_value_calc():
+    """
+    GET /api/premarket/value-calc?v1=..&v2=..&v3=..&v4=..&v5=..&v6=..
+    Value Calculator from the reference app's Trading Toolkit: six premiums
+    (call entry/T1/T2, put entry/T1/T2). /api/premarket/live already returns
+    this auto-fed from the fetched candles; this route recalculates from
+    values the user edited on the Pre Market page.
+    """
+    try:
+        from strategy.math_decision_strategy import value_calculator
+        missing = [f"v{i}" for i in range(1, 7) if not request.args.get(f"v{i}", "").strip()]
+        if missing:
+            return jsonify({"error": f"Missing value(s): {', '.join(missing)} — need six positive numbers v1..v6"}), 400
+        values = [float(request.args[f"v{i}"]) for i in range(1, 7)]
+        return jsonify(value_calculator(values))
+    except ValueError as e:
+        return jsonify({"error": f"Need six positive numbers v1..v6 ({e})"}), 400
+    except Exception as e:
+        logger.error(f"Value calculator failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Intraday Math-Engine Agent (PAPER only — see strategy/intraday_agent.py) ──
 
 
