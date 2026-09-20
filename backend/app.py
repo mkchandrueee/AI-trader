@@ -4011,6 +4011,17 @@ def api_positional_chart():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/positional/intraday-hammer")
+def api_positional_intraday_hammer():
+    """ChartBank 30-minute hammer signals on the collected NIFTY-I minute candles (read-only)."""
+    try:
+        from strategy.positional_service import get_intraday_hammer
+        return jsonify(get_intraday_hammer(request.args.get("symbol", "NIFTY-I")))
+    except Exception as e:
+        logger.error(f"intraday hammer failed: {e}")
+        return jsonify({"error": str(e), "signals": []}), 500
+
+
 @app.route("/api/positional/sync", methods=["GET", "POST"])
 def api_positional_sync():
     """POST starts the EOD bhavcopy sync + replay refresh in the background; GET reports progress."""

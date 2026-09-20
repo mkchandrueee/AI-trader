@@ -3,8 +3,12 @@ Positional Engine -- market regime, sector leadership and chart-pattern setups
 (IPO base, VCP, horizontal break, flag & pole) over the whole NSE EQ board,
 computed from the local EOD store (data/eod_store.py).
 
-The pattern rules below are OUR OWN definitions of the well-known setups, not
-a copy of any commercial screener; thresholds are module constants so they can
+The flag, cup & handle, triangle, RSI-divergence and hammer detectors follow the
+rules in the user's ChartBank study PDFs (pole/flag slope, U-shaped cup with a
+handle under a third of its height, converging trend lines with volume drying up,
+price-vs-RSI disagreement, hammer near support); targets are the PDFs' measured
+moves (pole height, cup height, widest triangle height). The horizontal, VCP and
+IPO rules are our own. Neither set is a copy of any commercial screener; thresholds are module constants so they can
 be tuned. Every detector is a pure function of numpy arrays ending at the bar
 being evaluated ("as of" that bar), which is what lets `replay_stats` measure
 each pattern's real forward hit-rate against the all-stock baseline instead of
@@ -49,6 +53,7 @@ FP_POLE_MIN_GAIN = 0.25
 FP_POLE_BARS = 15
 FP_FLAG_MIN, FP_FLAG_MAX = 4, 15
 FP_MAX_RETRACE = 0.50
+FP_MAX_FLAG_SLOPE = 0.004         # a flag may drift down or sideways; rising faster than 0.4%/bar is not a flag
 VCP_WINDOW = 15                    # three consecutive 15-bar windows
 VCP_MAX_FINAL_RANGE = 0.12
 VCP_NEAR_HIGH = 0.95
@@ -57,6 +62,15 @@ IPO_MIN_SESSIONS = 15
 IPO_MAX_RECENT_RANGE = 0.20
 IPO_NEAR_HIGH = 0.85
 BREAKOUT_VOL_MULT = 1.5
+CUP_BARS = (35, 50, 65, 80)
+CUP_HANDLE_BARS = (6, 10, 14, 18)
+CUP_RIM_TOL = 0.08                 # ChartBank: rims roughly level, slight tilt ok
+CUP_MIN_DEPTH, CUP_MAX_DEPTH = 0.12, 0.45
+TRI_WINDOWS = (30, 40, 55)
+TRI_FLAT = 0.0005                  # |slope| per bar (fraction of price) that still counts as a flat line
+TRI_SLOPE = 0.001
+HAMMER_DECLINE = 0.04              # fell at least 4% over the 10 bars into the hammer (daily)
+HAMMER_NEAR_SUPPORT = 0.03         # hammer low within 3% of the 40-bar low
 
 FORWARD_SESSIONS = 10
 FORWARD_HIT = 0.10                 # +10% intraday within the forward window
@@ -92,15 +106,46 @@ def _score(base: int, *bonuses: bool) -> int:
     return int(min(10, base + sum(1 for b in bonuses if b)))
 
 
-def _out(kind: str, state: str, score: int, entry: float, stop: float, c: float, *, box: Optional[tuple] = None, **extra) -> dict:
-    risk = entry - stop
-    return {
+def _out(kind: str, state: str, score: int, entry: float, stop: float, c: float, *, box: Optional[tuple] = None,
+         target: Optional[float] = None, **extra) -> dict:
+    risk = abs(entry - stop)
+    out = {
         "pattern": kind, "state": state, "score": score,
         "entry": round(entry, 2), "stop": round(stop, 2), "close": round(c, 2),
         "risk_pct": round(100 * risk / entry, 1) if entry > 0 else None,
         "box": None if box is None else [box[0], round(box[1], 2), round(box[2], 2)],  # [bars_back, top, bottom]
         **extra,
     }
+    if target is not None:
+        out["target"] = round(target, 2)
+        out["rr"] = round(abs(target - entry) / risk, 2) if risk > 0 else None
+    return out
+
+
+def _pivots(x: np.ndarray, k: int, high: bool) -> list[int]:
+    """Indexes that are the max (or min) of their +-k neighbourhood. Only bars with k bars after them qualify."""
+    idx = []
+    for i in range(k, len(x) - k):
+        before, after = x[i - k:i], x[i + 1:i + k + 1]
+        # strictly beyond the k bars before, at least level with the k after: a flat run yields ONE pivot (its first bar)
+        if (x[i] > before.max() and x[i] >= after.max()) if high else (x[i] < before.min() and x[i] <= after.min()):
+            idx.append(i)
+    return idx
+
+
+def _rsi(c: np.ndarray, n: int = 14) -> np.ndarray:
+    """Wilder RSI, same length as c (NaN until warm)."""
+    out = np.full(len(c), np.nan)
+    if len(c) <= n:
+        return out
+    d = np.diff(c)
+    up, dn = np.where(d > 0, d, 0.0), np.where(d < 0, -d, 0.0)
+    au, ad = up[:n].mean(), dn[:n].mean()
+    out[n] = 100.0 if ad == 0 else 100 - 100 / (1 + au / ad)
+    for i in range(n, len(d)):
+        au, ad = (au * (n - 1) + up[i]) / n, (ad * (n - 1) + dn[i]) / n
+        out[i + 1] = 100.0 if ad == 0 else 100 - 100 / (1 + au / ad)
+    return out
 
 
 # ── detectors: arrays end at the evaluated bar; each returns a dict or None ──
@@ -155,11 +200,16 @@ def detect_flag(o, h, l, c, v) -> Optional[dict]:
             state = "coiling"
         else:
             continue
+        fc = c[-fl - 1:-1]
+        slope = float(np.polyfit(np.arange(len(fc)), fc, 1)[0] / fc.mean())   # per bar; ChartBank: flag slopes AGAINST the pole
+        if slope > FP_MAX_FLAG_SLOPE:
+            continue
         vr = _vol_ratio(v)
         sc = _score(3, gain >= 0.35, retrace <= 0.30, state == "breakout" and vr >= BREAKOUT_VOL_MULT,
-                    vr >= 2.5, last > _sma(c, 50), fl >= 6)
-        cand = _out("flag", state, sc, f_hi, f_lo, last, box=(fl, f_hi, f_lo), pole_gain_pct=round(100 * gain, 1),
-                    retrace_pct=round(100 * retrace, 1), flag_bars=fl, vol_ratio=round(vr, 2))
+                    vr >= 2.5, last > _sma(c, 50), slope <= 0)
+        cand = _out("flag", state, sc, f_hi, f_lo, last, box=(fl, f_hi, f_lo), target=f_hi + (p_hi - p_lo),
+                    pole_gain_pct=round(100 * gain, 1), retrace_pct=round(100 * retrace, 1), flag_bars=fl,
+                    flag_slope_pct=round(100 * slope, 2), vol_ratio=round(vr, 2))
         if best is None or cand["score"] > best["score"]:
             best = cand
     return best
@@ -211,7 +261,196 @@ def detect_ipo_base(o, h, l, c, v, sessions_listed: int) -> Optional[dict]:
                 sessions_listed=sessions_listed, vol_ratio=round(vr, 2))
 
 
-PATTERNS = ("ipo", "vcp", "horizontal", "flag")
+def detect_cup(o, h, l, c, v) -> Optional[dict]:
+    """ChartBank cup & handle: U-shaped cup (not V) with roughly level rims, then a short handle that
+    retraces no more than a third of the cup's height. Target = cup height added to the breakout."""
+    n = len(c)
+    if n < 100:
+        return None
+    last = float(c[-1])
+    if last < 0.85 * float(h[-100:].max()):
+        return None
+    best = None
+    for hl in CUP_HANDLE_BARS:
+        for L in CUP_BARS:
+            if hl > L / 3 or n < hl + 1 + L + 5:
+                continue
+            seg_h, seg_l, seg_v = h[-hl - 1 - L:-hl - 1], l[-hl - 1 - L:-hl - 1], v[-hl - 1 - L:-hl - 1]
+            left, right = float(seg_h[:5].max()), float(seg_h[-5:].max())
+            if abs(left / right - 1) > CUP_RIM_TOL:
+                continue
+            rim, low = max(left, right), float(seg_l.min())
+            depth = (rim - low) / rim
+            if not (CUP_MIN_DEPTH <= depth <= CUP_MAX_DEPTH):
+                continue
+            li = int(seg_l.argmin())
+            if not (0.25 * L <= li <= 0.75 * L):
+                continue
+            if np.sum(seg_l <= low + (rim - low) / 4) < 0.4 * L:      # time spent at the bottom: rounded, not a V (a V gives ~25-30%)
+                continue
+            hand_h, hand_l = h[-hl - 1:-1], l[-hl - 1:-1]
+            hi_h, lo_h = float(hand_h.max()), float(hand_l.min())
+            if hi_h > rim * 1.03 or (rim - lo_h) > (rim - low) / 3:
+                continue
+            trig = max(rim, hi_h)
+            if last > trig:
+                state = "breakout"
+            elif last >= trig * (1 - HB_NEAR_PCT):
+                state = "coiling"
+            else:
+                continue
+            vr = _vol_ratio(v)
+            handle_vol_up = float(v[-hl - 1:-1].mean()) > float(seg_v.mean())
+            sc = _score(3, handle_vol_up, state == "breakout" and vr >= BREAKOUT_VOL_MULT, abs(left / right - 1) <= 0.03,
+                        0.15 <= depth <= 0.35, last > _sma(c, 50))
+            cand = _out("cup", state, sc, trig, lo_h, last, box=(hl + L, trig, low), target=trig + (rim - low),
+                        cup_depth_pct=round(100 * depth, 1), cup_bars=L, handle_bars=hl,
+                        handle_vol_up=handle_vol_up, vol_ratio=round(vr, 2))
+            if best is None or cand["score"] > best["score"]:
+                best = cand
+    return best
+
+
+def detect_triangle(o, h, l, c, v) -> Optional[dict]:
+    """ChartBank triangles: >=2 pivots on each converging line. Ascending (flat top, rising lows) and symmetric-in-an-
+    uptrend break UP; descending and symmetric-in-a-downtrend break DOWN (reported as 'breakdown', awareness only).
+    Target = widest height of the triangle from the breakout point."""
+    n = len(c)
+    if n < 100:
+        return None
+    last = float(c[-1])
+    best = None
+    for W in TRI_WINDOWS:
+        hh, ll = h[-W - 1:-1], l[-W - 1:-1]
+        ph, pl = _pivots(hh, 2, True), _pivots(ll, 2, False)
+        if len(ph) < 2 or len(pl) < 2 or ph[-1] - ph[0] < W * 0.4 or pl[-1] - pl[0] < W * 0.4:
+            continue
+        sh, bh = np.polyfit(ph, hh[ph], 1)
+        sl, bl = np.polyfit(pl, ll[pl], 1)
+        mid = float((hh.mean() + ll.mean()) / 2)
+        shp, slp = sh / mid, sl / mid
+        w0, wT = bh - bl, (sh * W + bh) - (sl * W + bl)
+        if w0 <= 0 or wT < 0.25 * w0 or wT > 0.75 * w0:      # converging, but not already past the apex
+            continue
+        if abs(shp) <= TRI_FLAT and slp >= TRI_SLOPE:
+            kind = "ascending"
+        elif abs(slp) <= TRI_FLAT and shp <= -TRI_SLOPE:
+            kind = "descending"
+        elif shp <= -TRI_FLAT and slp >= TRI_FLAT:
+            kind = "symmetric"
+        else:
+            continue
+        upper, lower = sh * W + bh, sl * W + bl
+        prior = float(c[-W - 1] / c[-W - 41] - 1)
+        bullish = kind in ("ascending", "symmetric") and prior >= 0.05
+        bearish = kind == "descending" or (kind == "symmetric" and prior <= -0.05)
+        half = W // 2
+        dry = float(v[-W - 1:-1][half:].mean()) < float(v[-W - 1:-1][:half].mean())
+        vr = _vol_ratio(v)
+        touches = len(ph) + len(pl)
+        if bullish:
+            if last > upper:
+                state = "breakout"
+            elif last >= upper * (1 - HB_NEAR_PCT):
+                state = "coiling"
+            else:
+                continue
+            sc = _score(3, dry, state == "breakout" and vr >= BREAKOUT_VOL_MULT, prior >= 0.20, touches >= 5, W >= 40)
+            cand = _out("triangle", state, sc, upper, lower, last, box=(W, upper, lower), target=upper + w0,
+                        variant=kind, prior_trend_pct=round(100 * prior, 1), touches=touches, vol_dry_up=dry, vol_ratio=round(vr, 2))
+        elif bearish and last < lower:
+            sc = _score(3, dry, vr >= BREAKOUT_VOL_MULT, touches >= 5, W >= 40)
+            cand = _out("triangle", "breakdown", sc, lower, upper, last, box=(W, upper, lower), target=lower - w0,
+                        variant=kind, prior_trend_pct=round(100 * prior, 1), touches=touches, vol_dry_up=dry, vol_ratio=round(vr, 2))
+        else:
+            continue
+        if best is None or cand["score"] > best["score"]:
+            best = cand
+    return best
+
+
+def _is_hammer(o, h, l, c, i: int) -> bool:
+    rng = h[i] - l[i]
+    if rng <= 0:
+        return False
+    body = abs(c[i] - o[i])
+    lower, upper = min(o[i], c[i]) - l[i], h[i] - max(o[i], c[i])
+    return lower >= 0.6 * rng and upper <= 0.15 * rng and lower >= 2 * body
+
+
+def detect_hammer(o, h, l, c, v, decline: float = HAMMER_DECLINE, near: float = HAMMER_NEAR_SUPPORT,
+                  min_target: float = 0.03) -> Optional[dict]:
+    """ChartBank hammer: a T-shaped candle after a decline, near a support zone. 'coiling' = the hammer is the latest
+    (completed) bar - aggressive entry; 'breakout' = the next bar closed above the hammer's high (confirmed).
+    SL just under the hammer's low; target = the nearest resistance (recent swing high), at least `min_target` (+3% on daily bars)."""
+    n = len(c)
+    if n < 45:
+        return None
+    if _is_hammer(o, h, l, c, n - 1):
+        i, state = n - 1, "coiling"
+    elif _is_hammer(o, h, l, c, n - 2) and c[-1] > h[n - 2]:
+        i, state = n - 2, "breakout"
+    else:
+        return None
+    if c[i - 10] / c[i] - 1 < decline or c[i] > float(c[i - 19:i + 1].mean()):     # must follow a real decline
+        return None
+    support = float(l[i - 40:i].min())
+    if l[i] > support * (1 + near):
+        return None
+    last = float(c[-1])
+    r = _rsi(c[-60:])
+    rsi_i = float(r[len(r) - 1 - (n - 1 - i)])
+    vavg = float(v[i - 20:i].mean())
+    vr = float(v[i]) / vavg if vavg > 0 else 0.0
+    entry, stop = float(h[i]), float(l[i]) * 0.998
+    resist = float(h[-30:].max())
+    target = resist if resist > entry * (1 + min_target) else entry * (1 + min_target)
+    sc = _score(3, rsi_i < 30, rsi_i < 40, vr >= BREAKOUT_VOL_MULT, l[i] <= support * 1.005, state == "breakout")
+    return _out("hammer", state, sc, entry, stop, last, target=target, rsi=round(rsi_i, 1), vol_ratio=round(vr, 2),
+                near_support_pct=round(100 * (l[i] / support - 1), 2), bars_back=n - 1 - i)
+
+
+def detect_rsi_div(o, h, l, c, v) -> Optional[dict]:
+    """ChartBank RSI divergence in a clear trend: price makes a lower low while RSI makes a higher low (bullish), or a
+    higher high on a lower RSI high (bearish, reported as 'breakdown' - awareness only). Bullish is 'breakout' once
+    price closes above the swing high between the two lows (the trend-line-break proxy), else 'coiling'."""
+    if len(c) < 70:
+        return None
+    oo, cc, hh, ll = o[-100:], c[-100:], h[-100:], l[-100:]
+    n = len(cc)
+    r = _rsi(cc)
+    last = float(cc[-1])
+    lows = [i for i in _pivots(ll, 3, False) if i >= n - 60 and not np.isnan(r[i])]
+    if len(lows) >= 2:
+        i1, i2 = lows[-2], lows[-1]
+        if (i2 - i1 >= 5 and n - 1 - i2 <= 15 and ll[i2] < ll[i1] * 0.995 and r[i2] > r[i1] + 2
+                and i1 >= 25 and cc[i1 - 25] > cc[i1] * 1.06):
+            entry, stop = float(hh[i1:i2 + 1].max()), float(ll[i2])
+            above = hh[max(0, n - 60):i1]
+            above = above[above > entry * 1.01]
+            target = float(above.min()) if len(above) else entry + 2 * (entry - stop)
+            vr = _vol_ratio(v)
+            state = "breakout" if last > entry else "coiling"
+            rng = hh[i2] - ll[i2]
+            hammer_like = rng > 0 and (min(oo[i2], cc[i2]) - ll[i2]) >= 0.5 * rng
+            sc = _score(3, min(r[i1], r[i2]) < 35, r[i2] - r[i1] >= 8, state == "breakout" and vr >= BREAKOUT_VOL_MULT,
+                        hammer_like, i2 - i1 >= 10)
+            return _out("rsi", state, sc, entry, stop, last, box=(n - 1 - i1, entry, stop), target=target, variant="bullish",
+                        rsi_low1=round(float(r[i1]), 1), rsi_low2=round(float(r[i2]), 1), vol_ratio=round(vr, 2))
+    highs = [i for i in _pivots(hh, 3, True) if i >= n - 60 and not np.isnan(r[i])]
+    if len(highs) >= 2:
+        i1, i2 = highs[-2], highs[-1]
+        if (i2 - i1 >= 5 and n - 1 - i2 <= 15 and hh[i2] > hh[i1] * 1.005 and r[i2] < r[i1] - 2
+                and i1 >= 25 and cc[i1 - 25] * 1.06 < cc[i1]):
+            entry, stop = float(ll[i1:i2 + 1].min()), float(hh[i2])
+            sc = _score(3, max(r[i1], r[i2]) > 65, r[i1] - r[i2] >= 8, last < entry, i2 - i1 >= 10)
+            return _out("rsi", "breakdown", sc, entry, stop, last, box=(n - 1 - i1, stop, entry), target=entry - 2 * (stop - entry),
+                        variant="bearish", rsi_high1=round(float(r[i1]), 1), rsi_high2=round(float(r[i2]), 1),
+                        vol_ratio=round(_vol_ratio(v), 2))
+    return None
+
+
+PATTERNS = ("ipo", "vcp", "horizontal", "flag", "cup", "triangle", "rsi", "hammer")
 
 
 def _detect_all(sym_arrays: dict, sessions_listed: int) -> dict[str, Optional[dict]]:
@@ -221,6 +460,10 @@ def _detect_all(sym_arrays: dict, sessions_listed: int) -> dict[str, Optional[di
         "vcp": detect_vcp(o, h, l, c, v),
         "horizontal": detect_horizontal(o, h, l, c, v),
         "flag": detect_flag(o, h, l, c, v),
+        "cup": detect_cup(o, h, l, c, v),
+        "triangle": detect_triangle(o, h, l, c, v),
+        "rsi": detect_rsi_div(o, h, l, c, v),
+        "hammer": detect_hammer(o, h, l, c, v),
     }
 
 
@@ -358,7 +601,8 @@ def scan(panel: pd.DataFrame, industries: Optional[dict[str, str]] = None) -> di
         "regime": compute_regime(sym),
         "sectors": compute_sectors(sym, industries or {}, per_symbol_count),
         "setups": setups,
-        "counts": {p: {"total": len(v), "breakout": sum(1 for d in v if d["state"] == "breakout")} for p, v in setups.items()},
+        "counts": {p: {"total": len(v), "breakout": sum(1 for d in v if d["state"] == "breakout"),
+                       "breakdown": sum(1 for d in v if d["state"] == "breakdown")} for p, v in setups.items()},
         "notes": [
             "Prices are unadjusted bhavcopy closes; symbols with a corporate-action gap in the lookback are skipped.",
             f"History is {total_sessions} sessions, so trend tests use SMA50/SMA100 and IPO bases mean listed inside this window.",
@@ -371,7 +615,8 @@ def chart_data(panel: pd.DataFrame, symbol: str, sessions: int = 90) -> Optional
     if g.empty:
         return None
     c = g["close"].to_numpy(float)
-    sma = lambda n: pd.Series(c).rolling(n).mean().round(2).tolist()  # noqa: E731
+    # NaN (a short history has no SMA50 yet) is not valid JSON -> null
+    sma = lambda n: [None if x != x else x for x in pd.Series(c).rolling(n).mean().round(2).tolist()]  # noqa: E731
     tail = slice(-sessions, None)
     return {
         "symbol": symbol,

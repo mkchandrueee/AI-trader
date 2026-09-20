@@ -4,13 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE } from "@/lib/api";
 import { RefreshCw } from "lucide-react";
 
-type PatternKey = "ipo" | "vcp" | "horizontal" | "flag";
+type PatternKey = "ipo" | "vcp" | "horizontal" | "flag" | "cup" | "triangle" | "rsi" | "hammer";
+type StateKey = "breakout" | "coiling" | "breakdown";
 type SubTab = "regime" | "sectors" | PatternKey;
 
 interface Setup {
   symbol: string;
   pattern: PatternKey;
-  state: "breakout" | "coiling";
+  state: StateKey;
   score: number;
   entry: number;
   stop: number;
@@ -27,6 +28,22 @@ interface Setup {
   touches?: number;
   contractions_pct?: number[];
   sessions_listed?: number;
+  target?: number;
+  rr?: number | null;
+  variant?: string;
+  cup_depth_pct?: number;
+  cup_bars?: number;
+  handle_bars?: number;
+  handle_vol_up?: boolean;
+  flag_slope_pct?: number;
+  prior_trend_pct?: number;
+  vol_dry_up?: boolean;
+  rsi?: number;
+  rsi_low1?: number;
+  rsi_low2?: number;
+  rsi_high1?: number;
+  rsi_high2?: number;
+  near_support_pct?: number;
 }
 
 interface Sector {
@@ -69,7 +86,7 @@ interface ScanResponse {
   sectors?: Sector[];
   sectors_available?: boolean;
   setups?: Record<PatternKey, Setup[]>;
-  counts?: Record<PatternKey, { total: number; breakout: number }>;
+  counts?: Record<PatternKey, { total: number; breakout: number; breakdown?: number }>;
   replay?: Replay | null;
   notes?: string[];
   error?: string;
@@ -108,9 +125,27 @@ const PATTERN_META: Record<PatternKey, { label: string; blurb: string }> = {
   },
   flag: {
     label: "Flag & Pole",
-    blurb: "A 25%+ run-up (pole) in under 15 sessions, then a shallow, tight flag (retrace under 50%). Trigger is a close above the flag high.",
+    blurb: "ChartBank rules: a steep 25%+ pole, then a flag that drifts sideways or down against it (retrace under 50%). Enter on a close above the flag top with heavy volume; target = the pole's height added to the breakout; exit on a close below the flag's lower line.",
+  },
+  cup: {
+    label: "Cup & Handle",
+    blurb: "ChartBank rules: a rounded (not V-shaped) cup with roughly level rims, then a short handle that gives back no more than a third of the cup's height, on rising volume. Enter on the handle breakout; target = the cup's height added to the breakout; the handle low is the final support.",
+  },
+  triangle: {
+    label: "Triangles",
+    blurb: "ChartBank rules: two converging trend lines with 2+ touches each after an established prior trend, volume drying up inside. Ascending and symmetric-in-an-uptrend break up (enter on a close above the top line); descending / symmetric-in-a-downtrend are shown under Breakdown for awareness. Target = the triangle's widest height from the breakout.",
+  },
+  rsi: {
+    label: "RSI Divergence",
+    blurb: "ChartBank rules: in a clear trend, price makes a lower low while RSI makes a higher low (bullish), or a higher high on a lower RSI high (bearish, under Breakdown). Confirm by price closing above the swing high between the two lows; target = the nearest resistance. Ignore sideways markets and combine with support/resistance.",
+  },
+  hammer: {
+    label: "Hammer",
+    blurb: "ChartBank rules: a T-shaped candle after a decline, near a support zone (RSI under 30 and a volume jump add weight). Aggressive = enter on the completed hammer (Coiling); safe = wait for the next candle to close above its high (Breakout). Stop just under the hammer low; target = the nearest resistance. The author's intraday version uses 30-minute candles — see the NIFTY card below.",
   },
 };
+
+const PATTERN_ORDER: PatternKey[] = ["ipo", "vcp", "horizontal", "flag", "cup", "triangle", "rsi", "hammer"];
 
 const C = { green: "#00e87b", red: "#ff3e3e", amber: "#e8c300", blue: "#4da6ff", dim: "#5a6270", faint: "#3d4450", text: "#c8cdd5", panel: "#181c24", line: "#252a33" };
 
@@ -151,7 +186,8 @@ function CandleChart({ symbol, setup }: { symbol: string; setup: Setup }) {
     const plotW = W - PAD_R;
     const step = plotW / n;
     const lows = [...data.low, setup.stop];
-    const highs = [...data.high, setup.entry];
+    const showTarget = setup.target != null && setup.target <= Math.max(...data.high) * 1.3 && setup.target >= Math.min(...data.low) * 0.7;
+    const highs = [...data.high, setup.entry, ...(showTarget && setup.target ? [setup.target] : [])];
     const min = Math.min(...lows), max = Math.max(...highs);
     const pad = (max - min) * 0.05 || 1;
     const lo = min - pad, hi = max + pad;
@@ -160,8 +196,8 @@ function CandleChart({ symbol, setup }: { symbol: string; setup: Setup }) {
     const vmax = Math.max(...data.volume, 1);
     const line = (arr: (number | null)[]) =>
       arr.map((v, i) => (v == null ? null : `${x(i).toFixed(1)},${y(v).toFixed(1)}`)).filter(Boolean).join(" ");
-    return { n, step, y, x, vmax, line, lo, hi };
-  }, [data, setup.entry, setup.stop, PRICE_H]);
+    return { n, step, y, x, vmax, line, lo, hi, showTarget };
+  }, [data, setup.entry, setup.stop, setup.target, PRICE_H]);
 
   return (
     <div ref={ref} style={{ background: "#0e1117", border: `1px solid ${C.line}` }}>
@@ -197,7 +233,8 @@ function CandleChart({ symbol, setup }: { symbol: string; setup: Setup }) {
           })}
           <polyline points={body.line(data.sma21)} fill="none" stroke={C.amber} strokeWidth={1} />
           <polyline points={body.line(data.sma50)} fill="none" stroke={C.blue} strokeWidth={1} />
-          {([[setup.entry, "Entry", C.amber], [setup.stop, "Stop", C.blue]] as [number, string, string][]).map(([p, label, col]) => (
+          {([[setup.entry, "Entry", C.amber], [setup.stop, "Stop", C.blue],
+             ...(body.showTarget && setup.target != null ? [[setup.target, "Target", C.green]] : [])] as [number, string, string][]).map(([p, label, col]) => (
             <g key={label}>
               <line x1={0} x2={W - PAD_R} y1={body.y(p)} y2={body.y(p)} stroke={col} strokeDasharray="4 3" strokeWidth={1} />
               <rect x={W - PAD_R + 2} y={body.y(p) - 7} width={PAD_R - 3} height={14} fill={col} />
@@ -222,8 +259,10 @@ function SetupCard({ s }: { s: Setup }) {
         <div className="flex items-center gap-2">
           <b className="text-[13px]" style={{ color: "#fff" }}>{s.symbol}</b>
           <span className="px-1.5 py-[1px] text-[8px] uppercase tracking-wider"
-            style={{ background: bo ? "#0a2a18" : "#1a1a0a", border: `1px solid ${bo ? "#1a5c3a" : "#3a3a1a"}`, color: bo ? C.green : C.amber }}>
-            {s.state}
+            style={{ background: bo ? "#0a2a18" : s.state === "breakdown" ? "#2a0a0a" : "#1a1a0a",
+              border: `1px solid ${bo ? "#1a5c3a" : s.state === "breakdown" ? "#5c1a1a" : "#3a3a1a"}`,
+              color: bo ? C.green : s.state === "breakdown" ? C.red : C.amber }}>
+            {s.state}{s.variant ? ` · ${s.variant}` : ""}
           </span>
         </div>
         <span className="px-1.5 py-[1px] text-[10px] font-bold" style={{ background: "#0d0f14", border: `1px solid ${C.line}`, color: C.text }}>{s.score}</span>
@@ -233,6 +272,7 @@ function SetupCard({ s }: { s: Setup }) {
         {s.rs_pct != null && <> · RS {s.rs_pct}</>}
         {s.vol_ratio != null && <> · vol {s.vol_ratio}×</>}
         {s.risk_pct != null && <> · risk {s.risk_pct}%</>}
+        {s.rr != null && <> · R:R {s.rr}</>}
       </div>
       <CandleChart symbol={s.symbol} setup={s} />
     </div>
@@ -248,6 +288,13 @@ function EvidenceBanner({ pattern, replay }: { pattern: PatternKey; replay?: Rep
     );
   }
   const r = replay.patterns[pattern];
+  if (!r) {
+    return (
+      <div className="p-3 mb-4 text-[10px]" style={{ background: "#181c24", border: `1px solid ${C.line}`, color: C.dim }}>
+        This pattern isn&apos;t in the cached replay yet — press <b>Sync data</b> to measure it.
+      </div>
+    );
+  }
   const b = replay.baseline;
   const small = r.n < 50;
   const lift = r.hit_lift;
@@ -265,6 +312,55 @@ function EvidenceBanner({ pattern, replay }: { pattern: PatternKey; replay?: Rep
   );
 }
 
+/* ---------- NIFTY 30-minute hammer (ChartBank intraday strategy) ---------- */
+interface IntradayResp {
+  symbol: string;
+  last_bar?: string;
+  bars?: number;
+  note?: string;
+  error?: string;
+  signals: (Setup & { hammer_time: string; seen_at: string })[];
+}
+
+function IntradayHammer() {
+  const [d, setD] = useState<IntradayResp | null>(null);
+  useEffect(() => { getJSON<IntradayResp>("/api/positional/intraday-hammer").then(setD).catch(() => setD({ symbol: "NIFTY-I", signals: [], error: "request failed" })); }, []);
+  return (
+    <div className="mb-5 p-3" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.blue }}>NIFTY futures · 30-minute hammer (ChartBank intraday strategy)</div>
+      <p className="text-[10px] mb-2" style={{ color: C.dim }}>
+        Completed 30-minute bars from our own collected minute candles. Coiling = the hammer just closed (aggressive entry); Breakout = the next bar closed above its high (safe entry).
+        Stop just under the hammer low; target = nearest resistance. Signals are historical reads on those bars, not order instructions.
+      </p>
+      {!d ? <p className="text-[10px]" style={{ color: C.faint }}>loading…</p>
+        : d.error ? <p className="text-[10px]" style={{ color: C.red }}>{d.error}</p>
+        : d.signals.length === 0 ? <p className="text-[10px]" style={{ color: C.faint }}>No hammer in the last 10 sessions{d.last_bar ? ` (last bar ${d.last_bar})` : ""}.</p>
+        : (
+          <div className="overflow-x-auto">
+            <table>
+              <thead><tr>{["Hammer bar", "State", "Score", "Entry", "Stop", "Target", "R:R", "RSI", "Vol×"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
+              <tbody>
+                {d.signals.map((x) => (
+                  <tr key={x.hammer_time}>
+                    <td>{x.hammer_time.slice(0, 16).replace("T", " ")}</td>
+                    <td style={{ color: x.state === "breakout" ? C.green : C.amber, fontWeight: 600 }}>{x.state}</td>
+                    <td style={{ fontWeight: 700 }}>{x.score}</td>
+                    <td style={{ color: C.amber }}>{inr(x.entry)}</td>
+                    <td style={{ color: C.blue }}>{inr(x.stop)}</td>
+                    <td style={{ color: C.green }}>{x.target != null ? inr(x.target) : "—"}</td>
+                    <td>{x.rr ?? "—"}</td>
+                    <td style={{ color: (x.rsi ?? 100) < 30 ? C.green : C.dim }}>{x.rsi ?? "—"}</td>
+                    <td style={{ color: (x.vol_ratio ?? 0) >= 1.5 ? C.green : C.dim }}>{x.vol_ratio ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+    </div>
+  );
+}
+
 /* ---------- main ---------- */
 export default function PositionalEngine() {
   const [data, setData] = useState<ScanResponse | null>(null);
@@ -272,7 +368,7 @@ export default function PositionalEngine() {
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [tab, setTab] = useState<SubTab>("regime");
   const [view, setView] = useState<"list" | "chart">("list");
-  const [stateFilter, setStateFilter] = useState<"breakout" | "coiling">("breakout");
+  const [stateFilter, setStateFilter] = useState<StateKey>("breakout");
   const [shown, setShown] = useState(12);
 
   const load = useCallback(async () => {
@@ -304,7 +400,7 @@ export default function PositionalEngine() {
   const subTabs: { key: SubTab; label: string; count?: number }[] = [
     { key: "regime", label: "Regime" },
     { key: "sectors", label: "Sector Leaders" },
-    ...(["ipo", "vcp", "horizontal", "flag"] as PatternKey[]).map((k) => ({ key: k as SubTab, label: PATTERN_META[k].label, count: data?.counts?.[k]?.total })),
+    ...PATTERN_ORDER.map((k) => ({ key: k as SubTab, label: PATTERN_META[k].label, count: data?.counts?.[k]?.total })),
   ];
 
   const isPattern = (t: SubTab): t is PatternKey => t !== "regime" && t !== "sectors";
@@ -381,7 +477,7 @@ export default function PositionalEngine() {
               <table>
                 <thead><tr>{["Pattern", "Breakouts", `+${data.replay.hit_threshold_pct}% rate`, "Lift", `${data.replay.drawdown_threshold_pct}% rate`, "Median return"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
                 <tbody>
-                  {(Object.keys(PATTERN_META) as PatternKey[]).map((k) => {
+                  {PATTERN_ORDER.filter((k) => data.replay!.patterns[k]).map((k) => {
                     const r = data.replay!.patterns[k];
                     return (
                       <tr key={k}>
@@ -436,16 +532,23 @@ export default function PositionalEngine() {
       {data && !data.error && isPattern(tab) && (
         <div>
           <p className="text-[10px] mb-3" style={{ color: C.dim }}>{PATTERN_META[tab].blurb}</p>
+          {tab === "hammer" && <IntradayHammer />}
           <EvidenceBanner pattern={tab} replay={data.replay} />
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div className="flex gap-1">
-              {(["breakout", "coiling"] as const).map((f) => (
-                <button key={f} onClick={() => { setStateFilter(f); setShown(12); }}
-                  className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider"
-                  style={{ background: stateFilter === f ? "#fff" : C.panel, color: stateFilter === f ? "#0e1117" : C.dim, border: `1px solid ${C.line}` }}>
-                  {f === "breakout" ? `Breakout (${data.counts?.[tab]?.breakout ?? 0})` : `Coiling (${(data.counts?.[tab]?.total ?? 0) - (data.counts?.[tab]?.breakout ?? 0)})`}
-                </button>
-              ))}
+              {(["breakout", "coiling", "breakdown"] as const)
+                .filter((f) => f !== "breakdown" || (data.counts?.[tab]?.breakdown ?? 0) > 0)
+                .map((f) => {
+                  const c = data.counts?.[tab];
+                  const n = f === "breakout" ? c?.breakout ?? 0 : f === "breakdown" ? c?.breakdown ?? 0 : (c?.total ?? 0) - (c?.breakout ?? 0) - (c?.breakdown ?? 0);
+                  return (
+                    <button key={f} onClick={() => { setStateFilter(f); setShown(12); }}
+                      className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider"
+                      style={{ background: stateFilter === f ? "#fff" : C.panel, color: stateFilter === f ? "#0e1117" : C.dim, border: `1px solid ${C.line}` }}>
+                      {f === "breakdown" ? "Breakdown / bearish" : f} ({n})
+                    </button>
+                  );
+                })}
             </div>
             <div className="flex gap-1">
               {(["list", "chart"] as const).map((v) => (
@@ -462,7 +565,7 @@ export default function PositionalEngine() {
           ) : view === "list" ? (
             <div className="overflow-x-auto" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
               <table>
-                <thead><tr>{["Symbol", "Score", "RS", "Close", "Chg", "Entry", "Stop", "Risk", "Vol×", "Detail"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
+                <thead><tr>{["Symbol", "Score", "RS", "Close", "Chg", "Entry", "Stop", "Target", "R:R", "Vol×", "Detail"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
                 <tbody>
                   {rows.map((s) => (
                     <tr key={s.symbol}>
@@ -473,13 +576,19 @@ export default function PositionalEngine() {
                       <td style={{ color: (s.change_pct ?? 0) >= 0 ? C.green : C.red }}>{s.change_pct != null ? `${s.change_pct}%` : "—"}</td>
                       <td style={{ color: C.amber }}>{inr(s.entry)}</td>
                       <td style={{ color: C.blue }}>{inr(s.stop)}</td>
-                      <td style={{ color: C.dim }}>{s.risk_pct != null ? `${s.risk_pct}%` : "—"}</td>
+                      <td style={{ color: C.green }}>{s.target != null ? inr(s.target) : "—"}</td>
+                      <td style={{ color: (s.rr ?? 0) >= 2 ? C.green : C.dim }}>{s.rr ?? "—"}</td>
                       <td style={{ color: (s.vol_ratio ?? 0) >= 1.5 ? C.green : C.dim }}>{s.vol_ratio ?? "—"}</td>
                       <td className="text-[9px]" style={{ color: C.faint }}>
                         {s.pole_gain_pct != null && `pole +${s.pole_gain_pct}% · retrace ${s.retrace_pct}% · ${s.flag_bars} bars`}
                         {s.depth_pct != null && `box ${s.depth_pct}% deep · ${s.touches} touches`}
                         {s.contractions_pct && `ranges ${s.contractions_pct.join(" → ")}%`}
                         {s.sessions_listed != null && `${s.sessions_listed} sessions listed`}
+                        {s.cup_depth_pct != null && `cup ${s.cup_depth_pct}% deep over ${s.cup_bars} bars · handle ${s.handle_bars} bars${s.handle_vol_up ? " · handle volume up" : ""}`}
+                        {s.variant && s.prior_trend_pct != null && `${s.variant} · prior trend ${s.prior_trend_pct}% · ${s.touches} touches${s.vol_dry_up ? " · volume dried up" : ""}`}
+                        {s.rsi_low1 != null && `RSI ${s.rsi_low1} → ${s.rsi_low2} while price made a lower low`}
+                        {s.rsi_high1 != null && `RSI ${s.rsi_high1} → ${s.rsi_high2} while price made a higher high`}
+                        {s.rsi != null && s.near_support_pct != null && `RSI ${s.rsi} · ${s.near_support_pct}% above support`}
                       </td>
                     </tr>
                   ))}

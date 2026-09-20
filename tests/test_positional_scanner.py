@@ -8,7 +8,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategy.positional_scanner import (
-    _clean, detect_flag, detect_horizontal, detect_ipo_base, detect_vcp,
+    _clean, _rsi, detect_cup, detect_flag, detect_hammer, detect_horizontal, detect_ipo_base, detect_rsi_div,
+    detect_triangle, detect_vcp,
 )
 
 
@@ -69,6 +70,63 @@ def test_corporate_action_gap_is_skipped():
     pc[30] = 50.0                      # NSE adjusts prev_close on the ex-date; yesterday's close is still 100
     assert _clean(pc, c) is False
     assert _clean(np.concatenate([[100.0], np.full(59, 100.0)]), np.full(60, 100.0)) is True
+
+
+def test_flag_target_is_pole_height_and_rising_flag_rejected():
+    pre = [100.0] * 60
+    pole = list(np.linspace(100, 140, 10))
+    flag = [138, 136, 137, 135, 136, 137, 136, 138]
+    d = detect_flag(*_bars(pre + pole + flag + [143.0]))
+    assert d and abs(d["target"] - (d["entry"] + 40 * 1.02)) < 6      # pole ~ low 99 -> high ~141.4
+    rising = list(np.linspace(130, 139, 8))                            # a flag climbing on, not against, the pole
+    assert detect_flag(*_bars(pre + pole + rising + [143.0])) is None
+
+
+def test_cup_and_handle():
+    pre = [80.0] * 45
+    cup = [100 - 25 * np.sin(np.pi * i / 59) ** 0.5 * 1 for i in range(60)]   # rounded bowl, rims ~100, low ~75
+    handle = [98, 96.5, 95.5, 96, 97, 96.5, 97.5, 98]
+    d = detect_cup(*_bars(pre + cup + handle + [103.0], vol=1000.0))
+    assert d and d["state"] == "breakout" and d["target"] > d["entry"] and d["stop"] < d["entry"]
+    vee = [100 - 25 * (1 - abs(i - 30) / 30) for i in range(60)]            # V-shaped: rejected
+    assert detect_cup(*_bars(pre + vee + handle + [103.0])) is None
+
+
+def test_triangle_ascending_breakout_and_target():
+    prior = list(np.linspace(70, 100, 60))
+    tri = []
+    for i in range(40):                                   # flat 110 ceiling, floor rising 95 -> 101
+        ph, floor = i % 10, 95 + 0.15 * i
+        tri.append(110.0 if ph == 0 else floor if ph == 5 else (110.0 + floor) / 2)
+    d = detect_triangle(*_bars(prior + tri + [114.0], spread=0.002))
+    assert d and d["variant"] == "ascending" and d["state"] == "breakout"
+    assert d["target"] > d["entry"] > d["stop"]
+    down = list(np.linspace(140, 100, 60))                # same shape after a DOWNtrend is not a bullish setup
+    d2 = detect_triangle(*_bars(down + tri + [114.0], spread=0.002))
+    assert d2 is None or d2["state"] != "breakout"
+
+
+def test_rsi_is_bounded_and_hammer_needs_decline():
+    r = _rsi(np.cumsum(np.random.default_rng(1).normal(0, 1, 200)) + 100)
+    assert np.nanmin(r) >= 0 and np.nanmax(r) <= 100
+    down = list(np.linspace(130, 100, 50))
+    o, h, l, c, v = _bars(down + [100.0])
+    o[-1], c[-1], h[-1], l[-1] = 99.6, 100.0, 100.05, 96.0                # long lower wick, small body at the top
+    d = detect_hammer(o, h, l, c, v)
+    assert d and d["state"] == "coiling" and d["stop"] < 96.0 and d["target"] >= d["entry"] * 1.03
+    flat = [100.0 + 0.1 * (i % 2) for i in range(50)]
+    o, h, l, c, v = _bars(flat + [100.0])
+    o[-1], c[-1], h[-1], l[-1] = 99.6, 100.0, 100.05, 96.0
+    assert detect_hammer(o, h, l, c, v) is None                            # no decline -> not a reversal hammer
+
+
+def test_bullish_rsi_divergence():
+    seg = (list(np.linspace(150, 130, 30)) + list(np.linspace(130, 100, 10)) + list(np.linspace(100, 112, 10))
+           + list(np.linspace(112, 99.0, 22)) + list(np.linspace(99, 100.5, 6)) + [100.0] * 3)
+    d = detect_rsi_div(*_bars(seg, spread=0.002))
+    assert d and d["variant"] == "bullish" and d["rsi_low2"] > d["rsi_low1"] and d["stop"] < d["entry"]
+    sideways = [100 + 2 * np.sin(i / 3) for i in range(90)]  # no clear trend -> no divergence signal
+    assert detect_rsi_div(*_bars(sideways)) is None
 
 
 if __name__ == "__main__":
