@@ -25,11 +25,24 @@ interface NextDayReading {
 interface LadderTarget { level: number; pts: number; action: "BOOK" | "HOLD"; pct: number }
 interface Ladder { entry: number; targets: LadderTarget[]; stop_loss: number; stop_pts: number }
 interface ChecklistRow { key: string; label: string; state: "pass" | "fail" | "warn" | "skip"; value: string }
+interface AnalyzerVerdict {
+  decision: "clear" | "tie" | "noEdge" | "insufficient";
+  side: "call" | "put" | null;
+  leader: "call" | "put";
+  signal: string;
+  headline: string;
+  confidence: number;
+  reason: string;
+  entry: number | null;
+  entry_note: string;
+  rules: string[];
+}
 interface AnalyzerBreakdown {
+  verdict: AnalyzerVerdict;
   scores: {
     call: number; put: number; margin: number;
     required_margin: number; required_confidence: number;
-    leader: "call" | "put"; decision: "clear" | "tie" | "noEdge" | "insufficient"; side: "call" | "put" | null;
+    leader: "call" | "put"; decision: string; side: "call" | "put" | null;
   };
   strength: { call_pct: number; put_pct: number; call_bullish: boolean; put_bullish: boolean };
   pcr: number | null;
@@ -37,6 +50,17 @@ interface AnalyzerBreakdown {
   checklist: ChecklistRow[];
   call_ladder: Ladder;
   put_ladder: Ladder;
+}
+interface PullbackEntry {
+  side: "call" | "put" | null;
+  wait: boolean;
+  zones?: { zone1: number; zone2: number; zone3: number };
+  stop_loss?: number;
+  stop_pts?: number;
+  targets?: { level: number; pts: number }[];
+  rr?: number | null;
+  cautions?: string[];
+  rules?: string[];
 }
 interface ValueCalc {
   inputs: number[];
@@ -81,6 +105,7 @@ interface LiveConfirmation {
   agrees_with_opening: boolean | null;
   analyzer: AnalyzerBreakdown;
   value_calc: ValueCalc;
+  pullback: PullbackEntry;
   error?: string;
 }
 
@@ -226,22 +251,6 @@ function StrengthBar({ label, pct, bullish, color }: { label: string; pct: numbe
       </div>
     </div>
   );
-}
-
-function verdictText(a: AnalyzerBreakdown): { text: string; sub: string; color: string } {
-  const s = a.scores;
-  if (s.decision === "clear" && s.side) {
-    return {
-      text: `YES — BUY ${s.side === "call" ? "CALL" : "PUT"}`,
-      sub: `${s.side === "call" ? "Call" : "Put"} score ${s.side === "call" ? s.call : s.put}% leads by ${s.margin}% (needs ${s.required_margin}%+ gap and ${s.required_confidence}%+ score).`,
-      color: s.side === "call" ? "#00e87b" : "#ff3e3e",
-    };
-  }
-  const why =
-    s.decision === "tie" ? "Both legs scored the same — a tie never picks a side."
-    : s.decision === "noEdge" ? `Gap is only ${s.margin}% — need ${s.required_margin}%+ for entry.`
-    : `Leader score ${Math.max(s.call, s.put)}% is below the ${s.required_confidence}% floor.`;
-  return { text: "NO — WAIT", sub: `Call score ${s.call}% | Put score ${s.put}%. ${why} Conditions weak — check again after the next candle closes.`, color: "#e8c300" };
 }
 
 export default function PreMarketPage() {
@@ -746,12 +755,13 @@ export default function PreMarketPage() {
                   </div>
                 )}
 
-                {/* Options Analyzer breakdown - the reference app's analyzer
-                    output, auto-fed from the same fetched candles (no manual
-                    entry of the 8 O/H/L/C values). Display-only. */}
+                {/* Options Analyzer - the reference app's analyzer output, auto-fed
+                    from the same fetched candles (no manual entry of the 8
+                    O/H/L/C values). Display-only. */}
                 {live.analyzer && (() => {
                   const a = live.analyzer;
-                  const v = verdictText(a);
+                  const v = a.verdict;
+                  const vColor = v.side === "call" ? "#00e87b" : v.side === "put" ? "#ff3e3e" : "#e8c300";
                   return (
                     <div className="mt-5 pt-4" style={{ borderTop: "1px solid #252a33" }}>
                       <h3 className="text-[11px] font-bold uppercase tracking-wider mb-1 flex items-center gap-2" style={{ color: "#4da6ff" }}>
@@ -759,21 +769,41 @@ export default function PreMarketPage() {
                         <span className="px-1.5 py-[1px] text-[8px] tracking-wider" style={{ background: "#0d1a2a", border: "1px solid #1a3a5c", color: "#4da6ff" }}>AUTO-FETCHED</span>
                       </h3>
                       <p className="text-[9px] mb-3" style={{ color: "#3d4450" }}>
-                        Candle-quality scores are the shape of one candle (direction 20 + body 40 + close position 40) — not a win probability.
+                        Scores are a candle-shape checklist (direction 20 + body 25 + close position 35 + PCR agreeing with the side 20) — not a win probability. A side needs a {a.scores.required_margin}%+ lead and a {a.scores.required_confidence}%+ score.
                       </p>
 
-                      <div className="p-3 mb-3 flex flex-wrap items-center justify-between gap-3" style={{ background: "#181c24", border: `1px solid ${v.color}` }}>
-                        <div>
-                          <div className="text-[15px] font-bold tracking-wider" style={{ color: v.color }}>{v.text}</div>
-                          <div className="text-[10px] mt-1 max-w-xl" style={{ color: "#5a6270" }}>{v.sub}</div>
+                      <div className="p-3 mb-3" style={{ background: "#181c24", border: `1px solid ${vColor}` }}>
+                        <div className="text-[9px] uppercase tracking-[0.2em] mb-1" style={{ color: "#5a6270" }}>{v.signal}</div>
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[18px] font-bold tracking-wider" style={{ color: vColor }}>{v.headline}</div>
+                            <div className="text-[10px] mt-2 leading-relaxed" style={{ color: "#8a93a1" }}>{v.reason}</div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-[26px] font-bold leading-none" style={{ color: vColor }}>{v.confidence}%</div>
+                            <div className="text-[8px] uppercase tracking-wider mt-1" style={{ color: "#5a6270" }}>Confidence</div>
+                          </div>
                         </div>
-                        <div className="flex gap-2">
-                          {([["Call", a.scores.call, "#00e87b"], ["Put", a.scores.put, "#ff3e3e"], ["Gap", a.scores.margin, "#c8cdd5"]] as [string, number, string][]).map(([l, n, c]) => (
+                        <div className="flex gap-2 mt-3">
+                          {([["Call score", a.scores.call, "#00e87b"], ["Put score", a.scores.put, "#ff3e3e"], ["Gap", a.scores.margin, "#c8cdd5"]] as [string, number, string][]).map(([l, n, c]) => (
                             <div key={l} className="px-3 py-1 text-center" style={{ background: "#0d0f14", border: "1px solid #252a33" }}>
                               <div className="text-[8px] uppercase tracking-wider" style={{ color: "#5a6270" }}>{l}</div>
-                              <div className="text-[15px] font-bold" style={{ color: c }}>{n}%</div>
+                              <div className="text-[14px] font-bold" style={{ color: c }}>{n}%</div>
                             </div>
                           ))}
+                        </div>
+                      </div>
+
+                      <div className="p-3 mb-3 flex items-center justify-between gap-3" style={{ background: "#181c24", border: "1px solid #3a3a1a" }}>
+                        <div>
+                          <div className="text-[8px] uppercase tracking-wider" style={{ color: "#5a6270" }}>Entry price</div>
+                          <div className="text-[22px] font-bold" style={{ color: "#e8c300" }}>
+                            {v.entry != null ? `₹${v.entry.toFixed(2)}` : "— SKIP —"}
+                          </div>
+                          <div className="text-[9px]" style={{ color: "#3d4450" }}>{v.entry != null ? v.entry_note : "Next candle — wait"}</div>
+                        </div>
+                        <div className="text-[13px] font-bold tracking-wider text-right" style={{ color: vColor }}>
+                          {v.side ? (v.side === "call" ? "BUY CALL" : "BUY PUT") : "NO TRADE"}
                         </div>
                       </div>
 
@@ -793,13 +823,102 @@ export default function PreMarketPage() {
                         })}
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                         <LadderTable title="Call targets" ladder={a.call_ladder} color="#00e87b" />
                         <LadderTable title="Put targets" ladder={a.put_ladder} color="#ff3e3e" />
+                      </div>
+
+                      <div className="p-3" style={{ background: "#0d1a14", border: "1px solid #1a3a2a" }}>
+                        <div className="text-[9px] uppercase tracking-wider mb-2" style={{ color: "#00e87b" }}>⚡ Exact rules — follow</div>
+                        <ol className="text-[11px] space-y-1 list-decimal pl-5" style={{ color: "#c8cdd5" }}>
+                          {v.rules.map((r, i) => <li key={i}>{r}</li>)}
+                        </ol>
                       </div>
                     </div>
                   );
                 })()}
+
+                {/* Pullback Entry - wait for a dip into 25/38/50% of the leading
+                    candle's range instead of buying the already-pumped close. */}
+                {live.pullback && (
+                  <div className="mt-5 pt-4" style={{ borderTop: "1px solid #252a33" }}>
+                    <h3 className="text-[11px] font-bold uppercase tracking-wider mb-1 flex items-center gap-2" style={{ color: "#00e87b" }}>
+                      Pullback Entry
+                      <span className="px-1.5 py-[1px] text-[8px] tracking-wider" style={{ background: "#0a2a18", border: "1px solid #1a5c3a", color: "#00e87b" }}>AUTO-FED</span>
+                    </h3>
+                    <p className="text-[9px] mb-3" style={{ color: "#3d4450" }}>
+                      Mistake: entering at the candle close — it has already pumped and a pull-back hits your SL. Right: spot the strong candle, wait for the dip, enter in the dip zone (25–50% of the range above the low); SL sits below the low only.
+                    </p>
+                    {live.pullback.wait || !live.pullback.zones ? (
+                      <div className="p-3 text-[12px] font-bold tracking-wider" style={{ background: "#181c24", border: "1px solid #e8c300", color: "#e8c300" }}>
+                        WAIT — NO CLEAR SIDE
+                        <div className="text-[10px] font-normal mt-1" style={{ color: "#5a6270" }}>The analyzer has no clear leader on this candle, so there is no dip to plan. Fetch again after the next candle closes.</div>
+                      </div>
+                    ) : (() => {
+                      const pb = live.pullback;
+                      const z = pb.zones!;
+                      const isCall = pb.side === "call";
+                      const c = isCall ? "#00e87b" : "#ff3e3e";
+                      const zoneCards: [string, string, number, string][] = [
+                        ["Zone 1 — aggressive", "low + 25% · tightest SL", z.zone1, "#e8c300"],
+                        ["Zone 2 — best (38%)", "golden zone · best R:R", z.zone2, "#4da6ff"],
+                        ["Zone 3 — last chance", "50% midpoint · above = skip", z.zone3, "#c8cdd5"],
+                      ];
+                      return (
+                        <>
+                          <div className="p-3 mb-3 flex flex-wrap items-center justify-between gap-2" style={{ background: "#181c24", border: `1px solid ${c}` }}>
+                            <div>
+                              <div className="text-[8px] uppercase tracking-wider" style={{ color: "#5a6270" }}>Decision</div>
+                              <div className="text-[18px] font-bold tracking-wider" style={{ color: c }}>{isCall ? "BUY CALL" : "BUY PUT"}</div>
+                              <div className="text-[10px] mt-1" style={{ color: "#8a93a1" }}>
+                                {isCall ? "Call" : "Put"} candle leads — enter when the dip comes.
+                              </div>
+                            </div>
+                            {pb.rr != null && (
+                              <div className="text-right">
+                                <div className="text-[8px] uppercase tracking-wider" style={{ color: "#5a6270" }}>R : R</div>
+                                <div className="text-[16px] font-bold" style={{ color: "#e8c300" }}>1 : {pb.rr}</div>
+                              </div>
+                            )}
+                          </div>
+                          {(pb.cautions ?? []).map((w) => (
+                            <div key={w} className="px-3 py-2 mb-3 text-[11px]" style={{ background: "#1a1a0a", border: "1px solid #3a3a1a", color: "#e8c300" }}>⚠ {w}</div>
+                          ))}
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
+                            {zoneCards.map(([label, note, value, color]) => (
+                              <div key={label} className="p-3" style={{ background: "#181c24", border: `1px solid ${color}44` }}>
+                                <div className="text-[9px] uppercase tracking-wider" style={{ color }}>{label}</div>
+                                <div className="text-[20px] font-bold" style={{ color }}>₹{value}</div>
+                                <div className="text-[9px]" style={{ color: "#3d4450" }}>{note}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mb-3" style={{ background: "#181c24", border: "1px solid #252a33" }}>
+                            <div className="px-3 py-2 text-[9px] uppercase tracking-wider" style={{ color: "#5a6270", borderBottom: "1px solid #1d222b" }}>
+                              Stop loss &amp; targets (measured from Zone 2)
+                            </div>
+                            <div className="flex items-center justify-between px-3 py-[6px] text-[11px]" style={{ borderBottom: "1px solid #1d222b" }}>
+                              <span style={{ color: "#5a6270" }}>STOP LOSS</span>
+                              <span><b style={{ color: "#ff3e3e" }}>₹{pb.stop_loss}</b> <span style={{ color: "#3d4450" }}>−{pb.stop_pts}pts</span></span>
+                            </div>
+                            {(pb.targets ?? []).map((t, i) => (
+                              <div key={i} className="flex items-center justify-between px-3 py-[6px] text-[11px]" style={{ borderBottom: "1px solid #1d222b" }}>
+                                <span style={{ color: "#5a6270" }}>TARGET {i + 1}</span>
+                                <span><b style={{ color: "#00e87b" }}>₹{t.level}</b> <span style={{ color: "#3d4450" }}>+{t.pts}pts</span></span>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="p-3" style={{ background: "#0d1a14", border: "1px solid #1a3a2a" }}>
+                            <div className="text-[9px] uppercase tracking-wider mb-2" style={{ color: "#00e87b" }}>Step by step</div>
+                            <ol className="text-[11px] space-y-1 list-decimal pl-5" style={{ color: "#c8cdd5" }}>
+                              {(pb.rules ?? []).map((r, i) => <li key={i}>{r}</li>)}
+                            </ol>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
 
                 {/* Value Calculator - auto-fed from the ladders above. */}
                 {vcResult && (

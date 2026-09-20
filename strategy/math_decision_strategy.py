@@ -284,24 +284,55 @@ def analyse_option_pair(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Options Analyzer breakdown + Value Calculator (reference "Trading Toolkit")
+# Options Analyzer + Pullback Entry + Value Calculator (reference "Trading Toolkit")
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # Display-only: nothing here changes analyse_option_pair()'s decision, so the
-# live agent's trading logic is untouched. Ladder maths reuse analyse_side()
-# (entry = close x 1.005, T1/T2/T3 = entry + 1/2/3.5 steps, stop = low - 0.3 x
-# range) which reproduces the reference's published legs to the paisa. The
-# checklist thresholds come from the reference source's analyser.js
-# conditions() (body >= 60%, close position >= 60%, PCR <= 0.8 bullish /
-# >= 1.2 bearish). One deliberate difference from analyse_side(): the
-# checklist and strength bars treat close >= open as bullish, because the
-# reference app's newer release shows a flat 127->127 candle as BULLISH.
+# live agent's trading logic is untouched.
+#
+# PROVENANCE — what is exact and what is fitted:
+#  * Target ladders reuse analyse_side() (entry = close x 1.005, T1/T2/T3 =
+#    entry + 1/2/3.5 steps, stop = low - 0.3 x range): exact, matches every
+#    published leg to the paisa.
+#  * Checklist rules come from the reference source (analyser.js): body
+#    >= 60% pass, 45-60% warn (config.js bodyModerate), below 45% fail; close
+#    position >= 60%; PCR <= 0.8 bullish / >= 1.2 bearish / else neutral.
+#  * The analyzer's side SCORE is not in any local source. It is fitted to the
+#    four samples published in the reference release videos and reproduces all
+#    of them exactly: direction 20 + body 25 + close position 35 + PCR aligned
+#    with the side 20 (call scores 40 / put 55 on sample 1; 80, 75 and 80 on
+#    samples 2-4). The half credit for a 45-60% body is an UNOBSERVED
+#    assumption (no published sample lands in that band as a scored leg).
+#  * The Pullback Entry levels are likewise fitted to two published samples
+#    and reproduce both exactly: zones at 25/38/50% of the range above the
+#    low, stop = low - 3, targets = zone-2 + max(floor, k x risk) with floors
+#    30/50/80 and k 1.5/2.5/4.0 (risk = zone-2 - stop). The reference's own
+#    "x/11" setup grade is NOT reproduced.
+#  * A flat close == open candle counts as bullish in the checklist, score and
+#    strength bars because the reference shows 127->127 as BULLISH (the engine
+#    itself still uses strict close > open, unchanged).
 
-ANALYZER_BODY_STRONG = 0.60
+ANALYZER_BODY_PASS = 0.60
+ANALYZER_BODY_WARN = 0.45
 ANALYZER_CLOSE_POS_STRONG = 0.60
 ANALYZER_PCR_BULLISH_MAX = 0.8
 ANALYZER_PCR_BEARISH_MIN = 1.2
+SCORE_W_DIRECTION, SCORE_W_BODY, SCORE_W_CLOSE, SCORE_W_PCR = 20, 25, 35, 20
+SCORE_BODY_WARN_CREDIT = 0.5   # unobserved assumption, see above
+ANALYZER_MIN_GAP = 20          # the video: "Need 20%+ gap for entry"
+ANALYZER_MIN_LEADER = 60       # config.js takeConfidence
 BOOK_PLAN = (("BOOK", 40), ("BOOK", 40), ("HOLD", 20))  # config.js bookT1Pct/bookT2Pct/holdT3Pct
+
+PB_ZONES = (0.25, 0.38, 0.50)
+PB_SL_POINTS = 3
+PB_TARGET_MULTS = (1.5, 2.5, 4.0)
+PB_TARGET_FLOORS = (30, 50, 80)
+
+
+def _r1(x: float) -> float:
+    """One decimal, halves up (the reference prints levels this way)."""
+    from decimal import Decimal, ROUND_HALF_UP
+    return float(Decimal(str(round(x, 10))).quantize(Decimal("0.1"), ROUND_HALF_UP))
 
 
 def _ladder(leg: LegAnalysis) -> dict:
@@ -325,6 +356,33 @@ def _display_strength(o: float, h: float, l: float, c: float) -> tuple[float, bo
     return _clamp(100 * toward * (0.5 + stats.body_ratio * 0.5), 0, 100), bullish
 
 
+def _pcr_bias(pcr: Optional[float]) -> str:
+    if pcr is None:
+        return "unknown"
+    if pcr >= ANALYZER_PCR_BEARISH_MIN:
+        return "bearish"
+    if pcr <= ANALYZER_PCR_BULLISH_MAX:
+        return "bullish"
+    return "neutral"
+
+
+def _leg_score(ohlc: tuple, side: str, pcr_bias: str) -> int:
+    o, h, l, c = ohlc
+    st = candle_stats(o, h, l, c)
+    pts = 0.0
+    if c >= o:
+        pts += SCORE_W_DIRECTION
+    if st.body_ratio >= ANALYZER_BODY_PASS:
+        pts += SCORE_W_BODY
+    elif st.body_ratio >= ANALYZER_BODY_WARN:
+        pts += SCORE_W_BODY * SCORE_BODY_WARN_CREDIT
+    if st.close_pos >= ANALYZER_CLOSE_POS_STRONG:
+        pts += SCORE_W_CLOSE
+    if (side == "call" and pcr_bias == "bullish") or (side == "put" and pcr_bias == "bearish"):
+        pts += SCORE_W_PCR
+    return int(pts + 0.5)
+
+
 def analyzer_breakdown(
     call_ohlc: tuple[float, float, float, float],
     put_ohlc: tuple[float, float, float, float],
@@ -334,24 +392,34 @@ def analyzer_breakdown(
     cfg = {**DEFAULT_CFG, **(cfg or {})}
     ce = analyse_side(*call_ohlc, cfg)
     pe = analyse_side(*put_ohlc, cfg)
-    sel = select_side(ce, pe, cfg)
 
     call_strength, call_bull = _display_strength(*call_ohlc)
     put_strength, put_bull = _display_strength(*put_ohlc)
 
     ce_close, pe_close = call_ohlc[3], put_ohlc[3]
     pcr = (pe_close / ce_close) if ce_close > 0 else None
-    if pcr is None:
-        pcr_bias = "unknown"
-    elif pcr >= ANALYZER_PCR_BEARISH_MIN:
-        pcr_bias = "bearish"
-    elif pcr <= ANALYZER_PCR_BULLISH_MAX:
-        pcr_bias = "bullish"
+    pcr_bias = _pcr_bias(pcr)
+
+    call_score = _leg_score(call_ohlc, "call", pcr_bias)
+    put_score = _leg_score(put_ohlc, "put", pcr_bias)
+    gap = abs(call_score - put_score)
+    leader = "call" if call_score >= put_score else "put"
+    leader_score = max(call_score, put_score)
+    if call_score == put_score:
+        decision = "tie"
+    elif gap < ANALYZER_MIN_GAP:
+        decision = "noEdge"
+    elif leader_score < ANALYZER_MIN_LEADER:
+        decision = "insufficient"
     else:
-        pcr_bias = "neutral"
+        decision = "clear"
+    side = leader if decision == "clear" else None
 
     def row(key, label, state, value):
         return {"key": key, "label": label, "state": state, "value": value}
+
+    def body_state(ratio):
+        return "pass" if ratio >= ANALYZER_BODY_PASS else ("warn" if ratio >= ANALYZER_BODY_WARN else "fail")
 
     checklist = [
         row("closed", "Candle fully closed?", "pass" if candle_closed else "fail",
@@ -361,25 +429,71 @@ def analyzer_breakdown(
         checklist.append(row(f"{name.lower()}_direction", f"{name} candle direction ({ohlc[0]:.2f}→{ohlc[3]:.2f})",
                              "pass" if bull else "fail", "BULLISH" if bull else "BEARISH"))
     for name, leg in (("Call", ce), ("Put", pe)):
-        pct = leg.stats.body_ratio * 100
-        checklist.append(row(f"{name.lower()}_body", f"{name} body strength (≥{ANALYZER_BODY_STRONG*100:.0f}%)",
-                             "pass" if leg.stats.body_ratio >= ANALYZER_BODY_STRONG else "fail", f"{pct:.2f}%"))
-    for name, leg in (("Call", ce), ("Put", pe)):
-        pct = leg.stats.close_pos * 100
-        checklist.append(row(f"{name.lower()}_close_pos", f"{name} close position — near range top (≥{ANALYZER_CLOSE_POS_STRONG*100:.0f}%)",
-                             "pass" if leg.stats.close_pos >= ANALYZER_CLOSE_POS_STRONG else "fail", f"{pct:.2f}%"))
+        checklist.append(row(f"{name.lower()}_body", f"{name} body strength",
+                             body_state(leg.stats.body_ratio), f"{leg.stats.body_ratio * 100:.2f}%"))
+    # The reference lists the CALL leg's close position only.
+    checklist.append(row("call_close_pos", "Call close position (near range top?)",
+                         "pass" if ce.stats.close_pos >= ANALYZER_CLOSE_POS_STRONG else "fail",
+                         f"{ce.stats.close_pos * 100:.2f}%"))
     checklist.append(row(
         "pcr", "PCR ratio (Put ÷ Call close)",
         "skip" if pcr is None else ("warn" if pcr_bias == "neutral" else "pass"),
         "n/a" if pcr is None else f"{pcr:.2f} → {pcr_bias.capitalize()}",
     ))
 
+    # ---- verdict card (leader leg) ----
+    lead_ohlc = call_ohlc if leader == "call" else put_ohlc
+    lead_leg = ce if leader == "call" else pe
+    lead_bull = call_bull if leader == "call" else put_bull
+    lead_ladder = _ladder(lead_leg)
+    if pcr is not None and ((leader == "call" and pcr < 1) or (leader == "put" and pcr > 1)):
+        pcr_text = f"{pcr:.2f} ({'Bullish' if leader == 'call' else 'Bearish'}) ✓"
+    else:
+        pcr_text = "n/a" if pcr is None else f"{pcr:.2f}"
+    reason = (
+        f"{leader.capitalize()} candle: {'Bullish ✓' if lead_bull else 'Bearish ✗'} | "
+        f"Body: {lead_leg.stats.body_ratio * 100:.2f}% {'✓' if lead_leg.stats.body_ratio >= ANALYZER_BODY_PASS else '⚠'} | "
+        f"Close position: {lead_leg.stats.close_pos * 100:.2f}% of range "
+        f"{'✓' if lead_leg.stats.close_pos >= ANALYZER_CLOSE_POS_STRONG else '⚠'} | PCR: {pcr_text}"
+    )
+
+    if side:
+        buy = "BUY CALL" if side == "call" else "BUY PUT"
+        t = lead_ladder["targets"]
+        rules = [
+            f"As soon as the candle close is confirmed → place the {buy} order at ₹{lead_ladder['entry']:.2f}.",
+            f"SL ₹{lead_ladder['stop_loss']:.2f} — exit immediately if hit, no delay.",
+            f"T1 ₹{t[0]['level']:.2f} hit → sell 40% (+{t[0]['pts']} pts).",
+            f"T2 ₹{t[1]['level']:.2f} hit → sell another 40% (+{t[1]['pts']} pts).",
+            f"T3 ₹{t[2]['level']:.2f} (+{t[2]['pts']} pts) — hold the last 20%.",
+        ]
+    else:
+        why = (
+            "both legs scored the same" if decision == "tie"
+            else f"gap is only {gap}% (need {ANALYZER_MIN_GAP}%+)" if decision == "noEdge"
+            else f"leader score {leader_score}% is below {ANALYZER_MIN_LEADER}%"
+        )
+        rules = [
+            "No entry on this candle — conditions weak.",
+            f"Call score {call_score}% vs Put score {put_score}% — {why}.",
+            "Fetch again after the next candle closes.",
+        ]
+
     return {
+        "verdict": {
+            "decision": decision, "side": side, "leader": leader,
+            "signal": ("BULLISH SIGNAL" if side == "call" else "BEARISH SIGNAL" if side == "put" else "NEUTRAL — WAIT"),
+            "headline": (f"YES — BUY {side.upper()}" if side else "NO — WAIT"),
+            "confidence": leader_score,
+            "reason": reason,
+            "entry": lead_ladder["entry"] if side else None,
+            "entry_note": f"Close {lead_ohlc[3]:.2f} + 0.5% buffer",
+            "rules": rules,
+        },
         "scores": {
-            "call": round(sel.call_score), "put": round(sel.put_score),
-            "margin": round(sel.margin), "required_margin": cfg["sideMinMargin"],
-            "required_confidence": cfg["sideMinConfidence"],
-            "leader": sel.leader, "decision": sel.decision, "side": sel.side,
+            "call": call_score, "put": put_score, "margin": gap,
+            "required_margin": ANALYZER_MIN_GAP, "required_confidence": ANALYZER_MIN_LEADER,
+            "leader": leader, "decision": decision, "side": side,
         },
         "strength": {
             "call_pct": round(call_strength), "put_pct": round(put_strength),
@@ -388,6 +502,40 @@ def analyzer_breakdown(
         "pcr": None if pcr is None else round(pcr, 2), "pcr_bias": pcr_bias,
         "checklist": checklist,
         "call_ladder": _ladder(ce), "put_ladder": _ladder(pe),
+    }
+
+
+def pullback_entry(side: Optional[str], ohlc: Optional[tuple]) -> dict:
+    """
+    The reference's Pullback Entry tab for the chosen leg: don't buy the
+    already-pumped candle close — wait for a dip into 25/38/50% of the candle's
+    range above its low. `side`/`ohlc` are the analyzer's leader; with no clear
+    leader there is nothing to enter (WAIT). See the provenance note above.
+    """
+    if side is None or ohlc is None:
+        return {"side": None, "wait": True}
+    o, h, l, c = ohlc
+    rng = h - l
+    z1, z2, z3 = (_r1(l + f * rng) for f in PB_ZONES)
+    stop = l - PB_SL_POINTS
+    risk = _r1(z2 - stop)
+    steps = [max(floor, _r1(mult * risk)) for floor, mult in zip(PB_TARGET_FLOORS, PB_TARGET_MULTS)]
+    body = abs(c - o) / rng if rng > 0 else 0.0
+    return {
+        "side": side, "wait": False,
+        "zones": {"zone1": z1, "zone2": z2, "zone3": z3},
+        "stop_loss": stop, "stop_pts": risk,
+        "targets": [{"level": _r1(z2 + s), "pts": s} for s in steps],
+        "rr": _r1(steps[1] / risk) if risk > 0 else None,
+        "cautions": ["Body weak — momentum is slow"] if body < ANALYZER_BODY_WARN else [],
+        "rules": [
+            "Candle closed → analysed.",
+            "Wait for the next candle to open — do not chase the close.",
+            f"Price touches Zone 1 (₹{z1:g}) → enter.",
+            f"Price runs past Zone 3 (₹{z3:g}) without dipping → skip the trade.",
+            f"SL ₹{stop:g} — only on a break of the candle's low structure.",
+            "T1 hit → move SL to entry → risk-free.",
+        ],
     }
 
 
@@ -404,18 +552,24 @@ def value_calculator(values: list[float]) -> dict:
         raise ValueError("value_calculator needs exactly 6 values")
     if any(not (v == v) or v <= 0 for v in values):
         raise ValueError("all six values must be positive numbers")
+    def _hu(n: float) -> float:
+        # Half-up on the decimal value (sample 4's 413.07/6 = 68.845 must show
+        # 68.85 like the reference; float round() gives 68.84). Display-only.
+        from decimal import Decimal, ROUND_HALF_UP
+        return float(Decimal(repr(round(n, 9))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
     avg = sum(values) / 6
     root = avg ** 0.5
     call_level = avg - root
     put_level = call_level * (1 - 0.55)
     return {
         "inputs": [round(v, 2) for v in values],
-        "average": _round2(avg),
-        "sqrt_of_avg": _round2(root),
-        "call_level": _round2(call_level),
-        "call_target": _round2(call_level * 1.25),
-        "put_level": _round2(put_level),
-        "put_target": _round2(put_level * 1.70),
+        "average": _hu(avg),
+        "sqrt_of_avg": _hu(root),
+        "call_level": _hu(call_level),
+        "call_target": _hu(call_level * 1.25),
+        "put_level": _hu(put_level),
+        "put_target": _hu(put_level * 1.70),
     }
 
 

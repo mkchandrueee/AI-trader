@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from strategy.math_decision_strategy import (
-    analyse_option_pair, analyzer_breakdown, nextday_bias, value_calculator,
+    analyse_option_pair, analyzer_breakdown, nextday_bias, pullback_entry, value_calculator,
 )
 from utils.logger import get_logger
 
@@ -471,6 +471,10 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         pl["entry"], pl["targets"][0]["level"], pl["targets"][1]["level"],
     ])
 
+    # Pullback Entry on the analyzer's leading leg (nothing to enter on WAIT).
+    lead_side = analyzer["verdict"]["side"]
+    pullback = pullback_entry(lead_side, ce_ohlc if lead_side == "call" else pe_ohlc)
+
     nextday = nextday_reading(symbol)
     nextday_side = {"bullish": "call", "bearish": "put"}.get(nextday.get("direction"))
     agrees_with_nextday = (decision.side == nextday_side) if (decision.side and nextday_side) else None
@@ -518,4 +522,5 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
         "agrees_with_opening": agrees_with_opening,
         "analyzer": analyzer,
         "value_calc": value_calc,
+        "pullback": pullback,
     }

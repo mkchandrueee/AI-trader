@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategy.math_decision_strategy import (
-    analyse_option_pair, analyzer_breakdown, value_calculator,
+    analyse_option_pair, analyzer_breakdown, pullback_entry, value_calculator,
 )
 
 # Video sample: CALL O127 H149 L118 C127, PUT O88 H99 L79 C95.
@@ -72,6 +72,60 @@ def test_value_calculator_rejects_bad_input():
         except ValueError:
             continue
         raise AssertionError(f"accepted bad input {bad}")
+
+
+# Samples 2-4 from the later reference videos: (call OHLC, put OHLC).
+S2 = ((95, 113, 49, 51), (19, 64, 19, 57))
+S3 = ((232, 258, 202, 249), (90, 102, 69, 72))
+S4 = ((70, 77, 48, 52), (30, 49, 30, 46))
+
+
+def _verdict(sample):
+    a = analyzer_breakdown(*sample)
+    return a, a["verdict"], a["scores"]
+
+
+def test_analyzer_scores_and_verdicts_match_videos():
+    a, v, sc = _verdict((CALL, PUT))
+    assert (sc["call"], sc["put"], sc["margin"]) == (40, 55, 15)
+    assert (v["signal"], v["headline"], v["confidence"], v["side"]) == ("NEUTRAL — WAIT", "NO — WAIT", 55, None)
+    for name, sample, side, conf, scores in (
+        ("S2", S2, "put", 80, (25, 80)), ("S3", S3, "call", 75, (75, 13)), ("S4", S4, "put", 80, (25, 80)),
+    ):
+        _, v, sc = _verdict(sample)
+        assert (sc["call"], sc["put"]) == scores, name
+        assert (v["side"], v["confidence"]) == (side, conf), name
+        assert v["headline"] == f"YES — BUY {side.upper()}", name
+
+
+def test_reason_lines_match_videos():
+    assert _verdict(S2)[1]["reason"] == "Put candle: Bullish ✓ | Body: 84.44% ✓ | Close position: 84.44% of range ✓ | PCR: 1.12 (Bearish) ✓"
+    assert _verdict(S3)[1]["reason"] == "Call candle: Bullish ✓ | Body: 30.36% ⚠ | Close position: 83.93% of range ✓ | PCR: 0.29 (Bullish) ✓"
+
+
+def test_body_check_is_tri_state():
+    states = {r["key"]: r["state"] for r in analyzer_breakdown(*S3)["checklist"]}
+    assert states["put_body"] == "warn"      # 54.55% sits in the 45-60% band
+    assert states["call_body"] == "fail"
+
+
+def test_pullback_matches_videos():
+    pb = pullback_entry("call", S3[0])
+    assert pb["zones"] == {"zone1": 216.0, "zone2": 223.3, "zone3": 230.0}
+    assert (pb["stop_loss"], pb["stop_pts"], pb["rr"]) == (199, 24.3, 2.5)
+    assert [t["level"] for t in pb["targets"]] == [259.8, 284.1, 320.5]
+    assert pb["cautions"] == ["Body weak — momentum is slow"]
+    pb = pullback_entry("put", S4[1])
+    assert pb["zones"] == {"zone1": 34.8, "zone2": 37.2, "zone3": 39.5}
+    assert (pb["stop_loss"], pb["stop_pts"], pb["rr"]) == (27, 10.2, 4.9)
+    assert [t["level"] for t in pb["targets"]] == [67.2, 87.2, 117.2]
+    assert pullback_entry(None, None)["wait"] is True
+
+
+def test_value_calculator_sample_4():
+    r = value_calculator([52.26, 75.46, 98.66, 46.23, 62.23, 78.23])
+    assert (r["average"], r["sqrt_of_avg"], r["call_level"]) == (68.85, 8.30, 60.55)
+    assert (r["call_target"], r["put_level"], r["put_target"]) == (75.68, 27.25, 46.32)
 
 
 if __name__ == "__main__":
