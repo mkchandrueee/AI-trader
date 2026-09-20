@@ -68,6 +68,7 @@ ai-trader/
 │   ├── signal_generator.py       # Generates BUY/SELL signals per strategy
 │   ├── math_decision_strategy.py # Deterministic ATM CE/PE candle-quality strategy (the "math strategy")
 │   ├── market_scanner.py         # Same candle-quality maths, applied across the whole NSE EOD board
+│   ├── positional_scanner.py     # Delivery tab's Positional Engine: regime, sector leaders, IPO/VCP/horizontal/flag setups + replay stats (own pattern definitions; data/eod_store.py feeds it)
 │   ├── trade_scorer.py      # Composite score = 0.5×ML + 0.3×flow + 0.2×tech
 │   ├── regime_detector.py   # TRENDING_BULL/BEAR/SIDEWAYS/HIGH_VOL/LOW_VOL
 │   └── options_flow_detector.py

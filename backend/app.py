@@ -3985,6 +3985,39 @@ def api_agent_delivery_picks():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/positional/scan")
+def api_positional_scan():
+    """Regime + sector leaders + IPO/VCP/horizontal/flag setups from the local EOD store."""
+    try:
+        from strategy.positional_service import get_scan
+        result = get_scan()
+        return jsonify(result), 200 if "error" not in result else 404
+    except Exception as e:
+        logger.error(f"positional scan failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/positional/chart")
+def api_positional_chart():
+    try:
+        from strategy.positional_service import get_chart
+        sym = (request.args.get("symbol") or "").strip()
+        if not sym:
+            return jsonify({"error": "symbol is required"}), 400
+        data = get_chart(sym, int(request.args.get("sessions", 90)))
+        return (jsonify(data), 200) if data else (jsonify({"error": f"no data for {sym}"}), 404)
+    except Exception as e:
+        logger.error(f"positional chart failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/positional/sync", methods=["GET", "POST"])
+def api_positional_sync():
+    """POST starts the EOD bhavcopy sync + replay refresh in the background; GET reports progress."""
+    from strategy.positional_service import start_sync, sync_status
+    return jsonify(start_sync() if request.method == "POST" else sync_status())
+
+
 @app.route("/api/agent/delivery/positions")
 def api_agent_delivery_positions():
     """Open + closed delivery paper positions, with live P&L where priced."""

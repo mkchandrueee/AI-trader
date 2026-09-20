@@ -35,3 +35,4 @@ _vendor-src/
 # Node
 node_modules/
 dashboard/.next/
+data/eod_cache/
