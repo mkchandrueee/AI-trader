@@ -28,6 +28,7 @@ from typing import Optional
 
 import pandas as pd
 
+from data.intraday_bars_store import load_bars, save_bars
 from data.live_bars import Instrument, fetch_bars
 from strategy import intraday_scanner as isc
 from utils.logger import get_logger
@@ -78,6 +79,25 @@ def market_open(now: Optional[datetime] = None) -> bool:
 def _boundary(now: datetime) -> datetime:
     """Start of the current 5-minute slot."""
     return now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % isc.BAR_MIN)
+
+
+def _last_session_day(now: datetime) -> date:
+    """The most recent weekday whose session has finished by `now` (exchange holidays aren't modelled: on one
+    the cache simply looks one session behind and a fetch is attempted, which is harmless)."""
+    d = now.date()
+    if not (d.weekday() < 5 and (now.hour, now.minute) >= MARKET_CLOSE):
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def _cache_is_current(df: pd.DataFrame, now: datetime) -> bool:
+    """True when the market is closed and `df` already holds the last finished session's final bar (>= 15:25)."""
+    if market_open(now) or df is None or df.empty:
+        return False
+    last = pd.Timestamp(df["timestamp"].iloc[-1])
+    return last.date() >= _last_session_day(now) and (last.hour, last.minute) >= (15, 25)
 
 
 def get_universe() -> list[str]:
@@ -169,7 +189,17 @@ def _sync_once(reason: str) -> None:
     for inst in insts:
         with _lock:
             old = _state["frames"].get(inst.symbol)
+        if old is None:
+            old = load_bars(inst.symbol)            # restart: reuse what earlier syncs persisted (REVIEW C2)
         have_history = old is not None and not old.empty and old["timestamp"].dt.date.nunique() >= 3
+        if have_history and _cache_is_current(old, now):
+            # Market closed and the cache already ends at the last session's final bar: nothing new can exist,
+            # so make no broker call at all (a restart after hours used to cost ~51 calls for the same bars).
+            with _lock:
+                _state["frames"][inst.symbol] = old.reset_index(drop=True)
+            sources["cache"] = sources.get("cache", 0) + 1
+            ok += 1
+            continue
         df, src, probs = fetch_bars(inst, start_today if have_history else start_full, now, "5min", today_only=have_history)
         if df is None:
             failed.append(inst.symbol)
@@ -178,8 +208,14 @@ def _sync_once(reason: str) -> None:
         if have_history:                        # keep prior sessions, replace everything from today's session start on
             day0 = pd.Timestamp(df["timestamp"].iloc[0]).normalize()
             df = pd.concat([old[old["timestamp"] < day0], df], ignore_index=True).drop_duplicates("timestamp").sort_values("timestamp")
+        df = df.reset_index(drop=True)
         with _lock:
-            _state["frames"][inst.symbol] = df.reset_index(drop=True)
+            _state["frames"][inst.symbol] = df
+        try:
+            # Completed bars only: a research file must never contain a bar that was still forming.
+            save_bars(inst.symbol, isc.completed_only(df, now))
+        except Exception as e:  # persistence must never break a live sync
+            logger.warning(f"[intraday] could not persist bars for {inst.symbol}: {e}")
         sources[src] = sources.get(src, 0) + 1
         ok += 1
 

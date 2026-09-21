@@ -139,6 +139,36 @@ def test_engine_rr_partial_is_the_rr_the_agent_takes():
     assert d.rr_partial == round(10 / 23.0, 2) == 0.43       # exits at entry+10, so this is what is actually risked
 
 
+def test_cache_currency_and_last_session_day():
+    from strategy import intraday_service as svc
+    mon_eve = datetime(2026, 9, 21, 22, 28)
+    assert svc._last_session_day(mon_eve) == datetime(2026, 9, 21).date()                 # after Monday's close
+    assert svc._last_session_day(datetime(2026, 9, 22, 8, 0)) == datetime(2026, 9, 21).date()   # before Tuesday's open
+    assert svc._last_session_day(datetime(2026, 9, 26, 12, 0)) == datetime(2026, 9, 25).date()  # Saturday -> Friday
+    assert svc._last_session_day(datetime(2026, 9, 21, 11, 0)) == datetime(2026, 9, 18).date()  # mid-session: last FINISHED one
+    fri = session(datetime(2026, 9, 18).date(), [100.0] * 75)
+    mon = session(datetime(2026, 9, 21).date(), [100.0] * 75)
+    assert svc._cache_is_current(frame(fri, mon), mon_eve) is True
+    assert svc._cache_is_current(fri, mon_eve) is False                                   # missing Monday's session
+    assert svc._cache_is_current(frame(fri, mon), datetime(2026, 9, 21, 11, 0)) is False  # market open: always refetch
+    assert svc._cache_is_current(frame(fri, session(datetime(2026, 9, 21).date(), [100.0] * 40)), mon_eve) is False  # cut short
+
+
+def test_bars_store_merge_keeps_latest_and_survives_odd_symbols(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+    from data import intraday_bars_store as store
+    store.BARS_DIR = Path(tempfile.mkdtemp())
+    a = session(D0, [100.0, 101.0, 102.0])
+    store.save_bars("M&M", a)
+    b = a.copy()
+    b.loc[2, "close"] = 555.0                                   # a re-fetched bar replaces its earlier copy
+    n = store.save_bars("M&M", b)
+    got = store.load_bars("M&M")
+    assert n == 3 and len(got) == 3 and float(got["close"].iloc[2]) == 555.0
+    assert list(store.load_all()) == ["M_M"]                    # '&' and '-' are sanitised in the file name
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
