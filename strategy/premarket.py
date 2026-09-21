@@ -404,7 +404,10 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
     # (see _get_mstock_client()) -- NOT constructed fresh per call.
     mstock = _get_mstock_client()
     mstock_ok = mstock.authenticate()
-    adapter = MarketDataAdapter()
+    # One shared AngelOne session for the whole process (data/live_bars.get_angel):
+    # a fresh MarketDataAdapter() here logged into AngelOne on EVERY call.
+    from data.live_bars import get_angel
+    adapter = get_angel()
     angelone_ok = adapter.authenticate()
     if not mstock_ok and not angelone_ok:
         return {"error": "Neither mStock nor AngelOne is connected — connect via the sidebar (needs a live session for option candles)."}

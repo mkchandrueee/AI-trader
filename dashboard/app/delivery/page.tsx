@@ -5,6 +5,7 @@ import Sidebar from "@/components/Sidebar";
 import { API_BASE } from "@/lib/api";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 import PositionalEngine from "./PositionalEngine";
+import IntradayEngine from "./IntradayEngine";
 
 interface Pick {
   symbol: string;
@@ -81,7 +82,7 @@ export default function DeliveryPage() {
   const [error, setError] = useState<string | null>(null);
   const [positions, setPositions] = useState<DeliveryPosition[]>([]);
   const [entering, setEntering] = useState<string | null>(null);
-  const [tab, setTab] = useState<"picks" | "positional">("picks");
+  const [tab, setTab] = useState<"picks" | "positional" | "intraday">("picks");
 
   const loadPositions = useCallback(() => {
     getJSON<{ positions: DeliveryPosition[] }>("/api/agent/delivery/positions")
@@ -140,7 +141,7 @@ export default function DeliveryPage() {
           </div>
 
           <div className="flex gap-1 mb-5" style={{ borderBottom: "1px solid #252a33" }}>
-            {([["picks", "Confirmed Picks"], ["positional", "Positional Engine"]] as const).map(([k, label]) => (
+            {([["picks", "Confirmed Picks"], ["positional", "Positional Engine"], ["intraday", "Intraday Engine"]] as const).map(([k, label]) => (
               <button key={k} onClick={() => setTab(k)} className="px-4 py-2 text-[11px] font-semibold uppercase tracking-wider"
                 style={{ color: tab === k ? "#fff" : "#5a6270", borderBottom: `2px solid ${tab === k ? "#4da6ff" : "transparent"}` }}>
                 {label}
@@ -148,7 +149,7 @@ export default function DeliveryPage() {
             ))}
           </div>
 
-          {tab === "positional" ? <PositionalEngine /> : (<>
+          {tab === "intraday" ? <IntradayEngine /> : tab === "positional" ? <PositionalEngine /> : (<>
           {/* Controls */}
           <div className="t-panel p-4 mb-5 flex flex-wrap items-end gap-3">
             <div>

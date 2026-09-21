@@ -36,3 +36,4 @@ _vendor-src/
 node_modules/
 dashboard/.next/
 data/eod_cache/
+data/intraday_cache/

@@ -4031,6 +4031,38 @@ def api_positional_intraday_hammer():
         return jsonify({"error": str(e), "signals": []}), 500
 
 
+@app.route("/api/intraday/scan")
+def api_intraday_scan():
+    """Intraday Engine: regime, sectors and 5-minute setups, with the live-sync report attached."""
+    try:
+        from strategy.intraday_service import get_scan
+        return jsonify(get_scan())
+    except Exception as e:
+        logger.error(f"intraday scan failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/intraday/chart")
+def api_intraday_chart():
+    try:
+        from strategy.intraday_service import get_chart
+        sym = (request.args.get("symbol") or "").strip()
+        if not sym:
+            return jsonify({"error": "symbol is required"}), 400
+        data = get_chart(sym, int(request.args.get("sessions", 2)))
+        return (jsonify(data), 200) if data else (jsonify({"error": f"no bars loaded for {sym}"}), 404)
+    except Exception as e:
+        logger.error(f"intraday chart failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/intraday/sync", methods=["POST"])
+def api_intraday_sync():
+    """Refresh now instead of waiting for the next 5-minute bar close."""
+    from strategy.intraday_service import sync_now
+    return jsonify(sync_now())
+
+
 @app.route("/api/positional/sync", methods=["GET", "POST"])
 def api_positional_sync():
     """POST starts the EOD bhavcopy sync + replay refresh in the background; GET reports progress."""
