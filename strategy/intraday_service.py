@@ -170,7 +170,7 @@ def _sync_once(reason: str) -> None:
         with _lock:
             old = _state["frames"].get(inst.symbol)
         have_history = old is not None and not old.empty and old["timestamp"].dt.date.nunique() >= 3
-        df, src, probs = fetch_bars(inst, start_today if have_history else start_full, now, "5min")
+        df, src, probs = fetch_bars(inst, start_today if have_history else start_full, now, "5min", today_only=have_history)
         if df is None:
             failed.append(inst.symbol)
             problems.extend(f"{inst.symbol} {p}" for p in probs[:2])
@@ -187,11 +187,11 @@ def _sync_once(reason: str) -> None:
         frames = dict(_state["frames"])
     scan = isc.scan(frames, now, _industries(), INDEX.symbol) if frames else None
 
-    stale: list[str] = []
+    stale: list[str] = list(scan.get("stale", [])) if scan else []       # behind the freshest bar: excluded from the scan
     if scan and scan.get("asof_bar") and market_open(now):
         expected = _boundary(now) - timedelta(minutes=isc.BAR_MIN)         # newest bar that must have closed by now
         for s, df in frames.items():
-            if s == INDEX.symbol:
+            if s in stale:
                 continue
             done = isc.completed_only(df, now)
             if done.empty or pd.Timestamp(done["timestamp"].iloc[-1]) < expected:

@@ -422,9 +422,18 @@ def scan(frames: dict[str, pd.DataFrame], now, industries: Optional[dict[str, st
     per_sym: dict[str, int] = {}
     index_row = None
     last_bars = []
+    built = []
     for sym, df in frames.items():
         s = Series.from_df(sym, completed_only(df, now))
-        if s is None:
+        if s is not None:
+            built.append((sym, s))
+    # A symbol whose newest bar is behind the freshest one (a previous session, or more than one bar back) is STALE:
+    # analysing it as "current" would mix yesterday's setups into today's scan. Report it, never scan it.
+    freshest = max((pd.Timestamp(s.t[-1]) for _, s in built), default=None)
+    stale: list[str] = []
+    for sym, s in built:
+        if freshest is not None and pd.Timestamp(s.t[-1]) < freshest - pd.Timedelta(minutes=BAR_MIN):
+            stale.append(sym)
             continue
         k = len(s.starts) - 1
         x = Ctx(s, k, len(s.c) - 1, s.starts[k])
@@ -444,7 +453,7 @@ def scan(frames: dict[str, pd.DataFrame], now, industries: Optional[dict[str, st
         setups[p].sort(key=lambda d: (-d["score"], order[d["state"]], d["symbol"]))
     asof = max(last_bars) if last_bars else None
     return {
-        "asof_bar": asof, "universe": len(rows),
+        "asof_bar": asof, "universe": len(rows), "stale": sorted(stale),
         "regime": compute_regime(rows, index_row, setups),
         "sectors": compute_sectors(rows, industries or {}, per_sym),
         "setups": setups,
