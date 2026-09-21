@@ -51,6 +51,9 @@ interface ReplayRow {
   stop_first_pct: number | null;
   hit_rate_pct: number | null;
   hit_lift: number | null;
+  avg_gross_pct?: number | null;
+  gap_past_target?: number;
+  gap_past_stop?: number;
 }
 interface Replay {
   sessions: number;
@@ -260,11 +263,16 @@ function Evidence({ pattern, replay }: { pattern: PatternKey; replay?: Replay | 
     <div className="p-3 mb-4 text-[10px] leading-relaxed" style={{ background: "#0d1a14", border: `1px solid ${small ? "#3a3a1a" : edge ? "#1a3a2a" : "#3a1a1a"}`, color: C.text }}>
       <b style={{ color: col }}>Measured on our own data, not assumed.</b> Replaying this exact rule on the last {replay.sessions} sessions of the same stocks: {r.n} confirmed setups
       over {r.days} session-days, entered at the next bar&apos;s open with the setup&apos;s own stop and target (held at most {replay.sim_max_bars * 5} min, {replay.cost_pct}% costs assumed):
-      win rate {r.win_rate_pct}%, average {r.avg_r}R, target reached before stop {r.target_first_pct}% / stop first {r.stop_first_pct}%, average net {r.avg_pnl_pct}% per trade.
-      {" "}A move of {replay.hit_threshold_pct}% in the signal&apos;s direction within {replay.forward_bars * 5} minutes happened {r.hit_rate_pct}% of the time
-      {r.hit_lift != null && <> ({r.hit_lift}× a random bar)</>}.
+      win rate {r.win_rate_pct}%, average {r.avg_r}R, target reached before stop {r.target_first_pct}% / stop first {r.stop_first_pct}%.
+      {" "}Average P&amp;L per trade: <b style={{ color: (r.avg_gross_pct ?? 0) > 0 ? C.green : C.red }}>{r.avg_gross_pct ?? "—"}%</b> before costs,{" "}
+      <b style={{ color: col }}>{r.avg_pnl_pct}%</b> after.
+      {(r.gap_past_target ?? 0) + (r.gap_past_stop ?? 0) > 0 && <> {r.gap_past_stop} gapped through the stop and {r.gap_past_target} past the target at the entry bar (counted as costs only).</>}
       {small && <b style={{ color: C.amber }}> Small sample — do not read anything into this yet.</b>}
-      {!small && !edge && <span style={{ color: C.red }}> No profitable edge after costs so far.</span>}
+      {!small && !edge && (r.avg_gross_pct ?? 0) <= 0.02 && <span style={{ color: C.red }}> No directional edge even before costs — a win rate here says nothing about profit.</span>}
+      {!small && !edge && (r.avg_gross_pct ?? 0) > 0.02 && <span style={{ color: C.amber }}> There is a small pre-cost edge, but costs consume it.</span>}
+      {r.hit_lift != null && r.hit_lift >= 1.2 && !edge && (
+        <span style={{ color: C.faint }}> ({r.hit_rate_pct}% saw a {replay.hit_threshold_pct}% move in the trade&apos;s direction vs a random bar&apos;s baseline, {r.hit_lift}× — that counts big moves, so it rises with volatility even when direction is a coin-flip.)</span>
+      )}
     </div>
   );
 }
@@ -403,7 +411,7 @@ export default function IntradayEngine() {
                 Pattern scorecard — last {data.replay.sessions} sessions, next-bar entry, own stop &amp; target, {data.replay.cost_pct}% costs
               </div>
               <table>
-                <thead><tr>{["Pattern", "Trades", "Win %", "Avg R", "Target first", "Stop first", "Net / trade", `${data.replay.hit_threshold_pct}% in ${data.replay.forward_bars * 5}m`, "Lift"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
+                <thead><tr>{["Pattern", "Trades", "Win %", "Avg R", "Target first", "Stop first", "Before costs", "After costs"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
                 <tbody>
                   {ORDER.filter((k) => data.replay!.patterns[k]).map((k) => {
                     const r = data.replay!.patterns[k];
@@ -415,9 +423,8 @@ export default function IntradayEngine() {
                         <td style={{ color: (r.avg_r ?? 0) > 0 ? C.green : C.red, fontWeight: 600 }}>{r.avg_r ?? "—"}</td>
                         <td>{r.target_first_pct ?? "—"}%</td>
                         <td>{r.stop_first_pct ?? "—"}%</td>
-                        <td style={{ color: (r.avg_pnl_pct ?? 0) > 0 ? C.green : C.red }}>{r.avg_pnl_pct ?? "—"}%</td>
-                        <td>{r.hit_rate_pct ?? "—"}%</td>
-                        <td>{r.hit_lift ?? "—"}×</td>
+                        <td style={{ color: (r.avg_gross_pct ?? 0) > 0 ? C.green : C.red }}>{r.avg_gross_pct ?? "—"}%</td>
+                        <td style={{ color: (r.avg_pnl_pct ?? 0) > 0 ? C.green : C.red, fontWeight: 600 }}>{r.avg_pnl_pct ?? "—"}%</td>
                       </tr>
                     );
                   })}

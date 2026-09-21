@@ -62,6 +62,12 @@ interface ReplayRow {
   drawdown_rate_pct: number | null;
   median_fwd_return_pct: number | null;
   hit_lift?: number | null;
+  // directional test (added 2026-09-21): the hit-rate lift is NOT one, it rises with volatility alone
+  mean_fwd_return_pct?: number | null;
+  mean_abs_move_pct?: number | null;
+  vs_baseline_pct?: number | null;
+  t_stat?: number | null;
+  move_ratio?: number | null;
 }
 
 interface Replay {
@@ -297,17 +303,28 @@ function EvidenceBanner({ pattern, replay }: { pattern: PatternKey; replay?: Rep
   }
   const b = replay.baseline;
   const small = r.n < 50;
-  const lift = r.hit_lift;
-  const good = !small && lift != null && lift >= 1.2;
-  const col = small ? C.amber : good ? C.green : C.dim;
+  const t = r.t_stat ?? null;
+  const edge = r.vs_baseline_pct ?? null;
+  // A directional edge needs the forward RETURN to beat the baseline with real statistical weight (|t| >= 2).
+  const directional = !small && t != null && edge != null && t >= 2 && edge > 0;
+  const worse = !small && t != null && edge != null && t <= -2;
+  const col = small ? C.amber : directional ? C.green : worse ? C.red : C.dim;
+  const bigMoves = r.hit_lift != null && r.hit_lift >= 1.2 && !directional;
   return (
-    <div className="p-3 mb-4 text-[10px] leading-relaxed" style={{ background: "#0d1a14", border: `1px solid ${small ? "#3a3a1a" : "#1a3a2a"}`, color: C.text }}>
-      <b style={{ color: col }}>Measured on our own data, not assumed.</b> Across {r.n} replayed breakouts in the last {replay.sessions} sessions,{" "}
-      {r.hit_rate_pct}% rose +{replay.hit_threshold_pct}% within {replay.horizon_sessions} sessions vs {b.hit_rate_pct}% for the same-universe baseline
-      {lift != null && <> (<b style={{ color: col }}>{lift}×</b>)</>}; {r.drawdown_rate_pct}% closed {Math.abs(replay.drawdown_threshold_pct)}% or more lower vs {b.drawdown_rate_pct}%.
-      Median {replay.horizon_sessions}-day return {r.median_fwd_return_pct}%.
+    <div className="p-3 mb-4 text-[10px] leading-relaxed" style={{ background: "#0d1a14", border: `1px solid ${small ? "#3a3a1a" : directional ? "#1a3a2a" : "#252a33"}`, color: C.text }}>
+      <b style={{ color: col }}>Measured on our own data, not assumed.</b> Across {r.n} replayed breakouts in the last {replay.sessions} sessions, the average{" "}
+      {replay.horizon_sessions}-day forward return was <b style={{ color: col }}>{r.mean_fwd_return_pct ?? "—"}%</b> vs {b.mean_fwd_return_pct ?? "—"}% for every stock-day
+      {edge != null && t != null && <> (difference {edge > 0 ? "+" : ""}{edge}%, t = {t})</>}; median {r.median_fwd_return_pct}%.
       {small && <b style={{ color: C.amber }}> Small sample — do not read anything into this yet.</b>}
-      {!small && !good && <span style={{ color: C.dim }}> No meaningful lift over the baseline so far.</span>}
+      {!small && directional && <b style={{ color: C.green }}> A statistically meaningful directional edge over the baseline.</b>}
+      {!small && !directional && !worse && <span style={{ color: C.dim }}> No statistically distinguishable directional edge (needs t ≥ 2).</span>}
+      {worse && <b style={{ color: C.red }}> Returns were meaningfully WORSE than an average stock-day.</b>}
+      {bigMoves && (
+        <span style={{ color: C.faint }}>
+          {" "}Note: {r.hit_rate_pct}% rose +{replay.hit_threshold_pct}% vs {b.hit_rate_pct}% baseline ({r.hit_lift}×) — but that counts big moves, and this pattern&apos;s average move is
+          {" "}{r.move_ratio ?? "—"}× the baseline in <i>either</i> direction. It shows volatility, not direction.
+        </span>
+      )}
     </div>
   );
 }
@@ -472,10 +489,10 @@ export default function PositionalEngine() {
           {data.replay && (
             <div style={{ background: C.panel, border: `1px solid ${C.line}` }}>
               <div className="px-3 py-2 text-[9px] uppercase tracking-wider" style={{ color: C.dim, borderBottom: `1px solid ${C.line}` }}>
-                Pattern scorecard — replayed breakouts, next {data.replay.horizon_sessions} sessions (baseline: {data.replay.baseline.hit_rate_pct}% rose +{data.replay.hit_threshold_pct}%)
+                Pattern scorecard — replayed breakouts, next {data.replay.horizon_sessions} sessions (baseline: mean return {data.replay.baseline.mean_fwd_return_pct ?? "—"}%, average move {data.replay.baseline.mean_abs_move_pct ?? "—"}%)
               </div>
               <table>
-                <thead><tr>{["Pattern", "Breakouts", `+${data.replay.hit_threshold_pct}% rate`, "Lift", `${data.replay.drawdown_threshold_pct}% rate`, "Median return"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
+                <thead><tr>{["Pattern", "Breakouts", "Mean return", "vs baseline", "t-stat", "Move size", `+${data.replay.hit_threshold_pct}% rate`, "Median return"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
                 <tbody>
                   {PATTERN_ORDER.filter((k) => data.replay!.patterns[k]).map((k) => {
                     const r = data.replay!.patterns[k];
@@ -483,9 +500,11 @@ export default function PositionalEngine() {
                       <tr key={k}>
                         <td style={{ fontWeight: 600 }}>{PATTERN_META[k].label}</td>
                         <td style={{ color: r.n < 50 ? C.amber : C.text }}>{r.n}{r.n < 50 && " (small)"}</td>
-                        <td>{r.hit_rate_pct}%</td>
-                        <td style={{ color: (r.hit_lift ?? 0) >= 1.2 ? C.green : C.dim, fontWeight: 600 }}>{r.hit_lift ?? "—"}×</td>
-                        <td>{r.drawdown_rate_pct}%</td>
+                        <td style={{ fontWeight: 600 }}>{r.mean_fwd_return_pct ?? "—"}%</td>
+                        <td style={{ color: (r.t_stat ?? 0) >= 2 ? C.green : (r.t_stat ?? 0) <= -2 ? C.red : C.dim }}>{r.vs_baseline_pct != null ? `${r.vs_baseline_pct > 0 ? "+" : ""}${r.vs_baseline_pct}%` : "—"}</td>
+                        <td style={{ color: Math.abs(r.t_stat ?? 0) >= 2 ? C.text : C.faint }}>{r.t_stat ?? "—"}</td>
+                        <td style={{ color: C.faint }}>{r.move_ratio != null ? `${r.move_ratio}×` : "—"}</td>
+                        <td style={{ color: C.faint }}>{r.hit_rate_pct}%</td>
                         <td>{r.median_fwd_return_pct}%</td>
                       </tr>
                     );

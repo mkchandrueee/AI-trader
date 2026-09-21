@@ -654,6 +654,7 @@ def replay_stats(panel: pd.DataFrame, progress: Optional[Callable[[int, int], No
             base["n"] += 1
             base["hit"] += hit
             base["dd"] += dd
+            base["rets"].append(fwd_close / c0 - 1)
             arrs = {k: a[k][:end] for k in ("o", "h", "l", "c", "v")}
             listed = end if a["listed_in_window"] else 10**6
             for p, d in _detect_all(arrs, listed).items():
@@ -671,15 +672,28 @@ def replay_stats(panel: pd.DataFrame, progress: Optional[Callable[[int, int], No
         r = x["rets"]
         return {"n": n, "hit_rate_pct": round(100 * x["hit"] / n, 1) if n else None,
                 "drawdown_rate_pct": round(100 * x["dd"] / n, 1) if n else None,
-                "median_fwd_return_pct": round(100 * float(np.median(r)), 2) if r else None}
+                "median_fwd_return_pct": round(100 * float(np.median(r)), 2) if r else None,
+                "mean_fwd_return_pct": round(100 * float(np.mean(r)), 3) if r else None,
+                "mean_abs_move_pct": round(100 * float(np.mean(np.abs(r))), 2) if r else None}
 
-    b = fin({**base, "rets": []})
+    b = fin(base)
+    base_r = np.array(base["rets"]) if base["rets"] else np.array([0.0])
     out = {"horizon_sessions": FORWARD_SESSIONS, "hit_threshold_pct": 100 * FORWARD_HIT,
            "drawdown_threshold_pct": 100 * FORWARD_DRAWDOWN, "baseline": b,
            "patterns": {}, "asof": str(panel["date"].max()), "sessions": int(panel["date"].nunique())}
     for p in PATTERNS:
         f = fin(stats[p])
         f["hit_lift"] = round(f["hit_rate_pct"] / b["hit_rate_pct"], 2) if f["hit_rate_pct"] and b["hit_rate_pct"] else None
+        # DIRECTIONAL test (the hit-rate lift above is NOT one: it counts a +10% move, so it rises with volatility even if
+        # the stock is as likely to fall -- e.g. flag: lift 1.6x but mean |move| 6.96% vs 5.27% and a return BELOW baseline).
+        r = np.array(stats[p]["rets"]) if stats[p]["rets"] else None
+        if r is not None and len(r) >= 30:
+            edge = float(r.mean() - base_r.mean())
+            f["vs_baseline_pct"] = round(100 * edge, 3)
+            f["t_stat"] = round(edge / (float(r.std(ddof=1)) / np.sqrt(len(r))), 2)
+            f["move_ratio"] = round(f["mean_abs_move_pct"] / b["mean_abs_move_pct"], 2) if b["mean_abs_move_pct"] else None
+        else:
+            f["vs_baseline_pct"] = f["t_stat"] = f["move_ratio"] = None
         out["patterns"][p] = f
     return out
 

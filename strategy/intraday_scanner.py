@@ -596,6 +596,9 @@ def replay_stats(frames: dict[str, pd.DataFrame], max_sessions: int = 12, progre
         out["patterns"][p] = {
             "n": n, "days": len(st["days"]), "win_rate_pct": pct(int((pnl > 0).sum()), n) if n else None,
             "avg_r": round(float(rr.mean()), 2) if n else None, "avg_pnl_pct": round(100 * float(pnl.mean()), 3) if n else None,
+            # before costs: separates "no directional edge" (this is ~0) from "an edge that costs eat" (this is >0).
+            # 2026-09-21 research: every pattern's gross drift was zero or slightly negative.
+            "avg_gross_pct": round(100 * (float(pnl.mean()) + COST_PCT + SLIPPAGE_PCT), 3) if n else None,
             "target_first_pct": pct(st["tgt"], n), "stop_first_pct": pct(st["stp"], n),
             "gap_past_target": st["gap_t"], "gap_past_stop": st["gap_s"],
             "hit_rate_pct": hit, "hit_lift": round(hit / ref, 2) if hit and ref else None,
