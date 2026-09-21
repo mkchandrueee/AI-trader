@@ -120,6 +120,11 @@ const C = { green: "#00e87b", red: "#ff3e3e", amber: "#e8c300", blue: "#4da6ff",
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
+  if (!(res.headers.get("content-type") || "").includes("json")) {
+    throw new Error(res.status === 404
+      ? "The backend is running an older build without the Intraday routes — restart it to load them."
+      : `Unexpected response from the backend (HTTP ${res.status}).`);
+  }
   return res.json();
 }
 
