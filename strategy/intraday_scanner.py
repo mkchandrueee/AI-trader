@@ -54,7 +54,11 @@ BREAKOUT_VOL_MULT = 1.5
 FORWARD_BARS = 6                   # replay hit-rate window: 30 minutes
 FORWARD_HIT = 0.005                # +0.5% within it
 SIM_MAX_BARS = 24                  # trade replay: at most 2 hours
-COST_PCT = 0.0005                  # 0.05% round-trip friction assumed in the replay
+# Round-trip friction for NSE intraday equity: brokerage ~0.06% + STT 0.025% (sell side) + exchange/GST/stamp ~0.02%
+# = ~0.105%, plus slippage: a breakout is bought as the bar has already moved, so >=0.05% is the floor. The first
+# version assumed 0.05% in total, ~3x too low (REVIEW_2026-09-21.md A3).
+COST_PCT = 0.00105
+SLIPPAGE_PCT = 0.0005
 
 PATTERNS = ("orb", "vwap", "level", "box", "hammer")
 
@@ -486,8 +490,13 @@ def _simulate(s: Series, i: int, d: dict, end: int) -> Optional[tuple]:
         return None
     long = d["state"] in ("breakout", "coiling")
     fill, stop, target = float(s.o[j0]), d["stop"], d["target"]
-    if (long and (fill <= stop or fill >= target)) or (not long and (fill >= stop or fill <= target)):
-        return None
+    # A gap through the target or the stop at the fill bar is a real outcome, not a non-event: you would have entered
+    # at the open and paid costs for ~0 gross. Dropping these (the first version did) removed the gap-through-stop
+    # losers and so flattered every pattern (REVIEW C4). They are traded at the open, exit at the open, and counted.
+    if (long and fill >= target) or (not long and fill <= target):
+        return -(COST_PCT + SLIPPAGE_PCT), 0.0, "gap_target"
+    if (long and fill <= stop) or (not long and fill >= stop):
+        return -(COST_PCT + SLIPPAGE_PCT), 0.0, "gap_stop"
     risk = abs(fill - stop)
     exit_px, reason = float(s.c[min(end - 1, i + SIM_MAX_BARS)]), "timeout"
     for j in range(j0, min(end, i + 1 + SIM_MAX_BARS)):
@@ -507,7 +516,7 @@ def _simulate(s: Series, i: int, d: dict, end: int) -> Optional[tuple]:
                 exit_px, reason = target, "target"
                 break
     sign = 1.0 if long else -1.0
-    return sign * (exit_px - fill) / fill - COST_PCT, sign * (exit_px - fill) / risk, reason
+    return sign * (exit_px - fill) / fill - (COST_PCT + SLIPPAGE_PCT), sign * (exit_px - fill) / risk, reason
 
 
 def replay_stats(frames: dict[str, pd.DataFrame], max_sessions: int = 12, progress: Optional[Callable[[int, int], None]] = None) -> dict:
@@ -517,7 +526,7 @@ def replay_stats(frames: dict[str, pd.DataFrame], max_sessions: int = 12, progre
     trades, win %, avg R, target-before-stop %, average net P&L %, and the 30-minute +0.5% hit-rate lift versus
     the same-universe baseline for that direction. Read-only.
     """
-    acc = {p: {"pnl": [], "r": [], "tgt": 0, "stp": 0, "hit": 0, "n": 0, "n_long": 0, "days": set()} for p in PATTERNS}
+    acc = {p: {"pnl": [], "r": [], "tgt": 0, "stp": 0, "gap_t": 0, "gap_s": 0, "hit": 0, "n": 0, "n_long": 0, "days": set()} for p in PATTERNS}
     base = {"long": {"n": 0, "hit": 0}, "short": {"n": 0, "hit": 0}}
     names = [s for s in frames if frames[s] is not None and not frames[s].empty]
     for si, sym in enumerate(names):
@@ -542,7 +551,10 @@ def replay_stats(frames: dict[str, pd.DataFrame], max_sessions: int = 12, progre
                 for p, d in detect_all(x).items():
                     if d is None or d["state"] == "coiling":
                         continue
-                    key = (p, d["state"], d["entry"])
+                    # ONE trade per pattern+direction per symbol-session. Keying on the entry price only worked for
+                    # orb/level (fixed trigger); box/vwap entries drift every bar so they re-traded the same setup
+                    # ~4-5x a day and inflated their samples ~5x (REVIEW A4).
+                    key = (p, d["state"])
                     if key in seen:
                         continue
                     seen.add(key)
@@ -556,6 +568,8 @@ def replay_stats(frames: dict[str, pd.DataFrame], max_sessions: int = 12, progre
                     st["r"].append(r)
                     st["tgt"] += why == "target"
                     st["stp"] += why == "stop"
+                    st["gap_t"] += why == "gap_target"
+                    st["gap_s"] += why == "gap_stop"
                     st["days"].add(str(s.days[k]))
                     lg = d["state"] == "breakout"
                     st["n_long"] += lg
@@ -566,7 +580,7 @@ def replay_stats(frames: dict[str, pd.DataFrame], max_sessions: int = 12, progre
     def pct(x, n):
         return round(100 * x / n, 1) if n else None
 
-    out = {"sessions": max_sessions, "forward_bars": FORWARD_BARS, "hit_threshold_pct": 100 * FORWARD_HIT, "cost_pct": 100 * COST_PCT,
+    out = {"sessions": max_sessions, "forward_bars": FORWARD_BARS, "hit_threshold_pct": 100 * FORWARD_HIT, "cost_pct": round(100 * (COST_PCT + SLIPPAGE_PCT), 3),
            "sim_max_bars": SIM_MAX_BARS,
            "baseline": {"long_hit_rate_pct": pct(base["long"]["hit"], base["long"]["n"]), "short_hit_rate_pct": pct(base["short"]["hit"], base["short"]["n"]),
                         "bars": base["long"]["n"]},
@@ -583,6 +597,7 @@ def replay_stats(frames: dict[str, pd.DataFrame], max_sessions: int = 12, progre
             "n": n, "days": len(st["days"]), "win_rate_pct": pct(int((pnl > 0).sum()), n) if n else None,
             "avg_r": round(float(rr.mean()), 2) if n else None, "avg_pnl_pct": round(100 * float(pnl.mean()), 3) if n else None,
             "target_first_pct": pct(st["tgt"], n), "stop_first_pct": pct(st["stp"], n),
+            "gap_past_target": st["gap_t"], "gap_past_stop": st["gap_s"],
             "hit_rate_pct": hit, "hit_lift": round(hit / ref, 2) if hit and ref else None,
         }
     return out

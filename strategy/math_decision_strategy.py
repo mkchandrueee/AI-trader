@@ -207,6 +207,10 @@ class TradeDecision:
     verdict: str                   # "take" | "caution" | "wait"
     blockers: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    # R:R of the trade the live agent ACTUALLY takes: it exits the whole lot at `partial`
+    # (entry + enginePartialPts), so partial_pts / risk -- not `rr` (target_pts / risk),
+    # which is the reference tool's figure for the far target and stays unchanged for parity.
+    rr_partial: float = float("nan")
 
 
 def analyse_option_pair(
@@ -248,6 +252,7 @@ def analyse_option_pair(
 
     risk = _round2(entry - stop)
     rr = _round2(target_pts / risk) if risk > 0 else float("nan")
+    rr_partial = _round2(partial_pts / risk) if risk > 0 else float("nan")
 
     call_bull = directional_strength(ce.stats) / 100 if ce.stats.bullish else 0.0
     put_bull = directional_strength(pe.stats) / 100 if pe.stats.bullish else 0.0
@@ -279,7 +284,7 @@ def analyse_option_pair(
         entry=entry, partial=partial, target=target, stop=stop,
         risk=risk, reward=float(target_pts), rr=rr,
         confidence=confidence, tier=tier, verdict=verdict,
-        blockers=blockers, warnings=warnings,
+        blockers=blockers, warnings=warnings, rr_partial=rr_partial,
     )
 
 

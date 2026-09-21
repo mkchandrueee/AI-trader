@@ -273,7 +273,11 @@ def replay_day(trading_date: date, exit_field: str, min_rr: float,
         decision = analyse_option_pair(call_ohlc, put_ohlc, cfg)
         if not decision.tradable:
             continue
-        if min_rr > 0 and decision.rr == decision.rr and decision.rr < min_rr:  # NaN-safe
+        # Gate on the R:R of the trade actually taken: the live agent exits at `partial`
+        # (entry + partial_pts), so partial_pts/risk is what matters there; `rr` (target_pts/risk)
+        # only applies when exiting at `target`. See REVIEW_2026-09-21.md A1.
+        gate_rr = decision.rr_partial if exit_field == "partial" else decision.rr
+        if min_rr > 0 and gate_rr == gate_rr and gate_rr < min_rr:  # NaN-safe
             continue
 
         side = decision.side
@@ -286,7 +290,7 @@ def replay_day(trading_date: date, exit_field: str, min_rr: float,
             date=str(trading_date), entry_time=entry_dt, mode=mode, side=side,
             option_symbol=opt_symbol, strike=strike, entry=decision.entry,
             stop=decision.stop, partial=decision.partial, target=decision.target,
-            rr=decision.rr, confidence=decision.confidence, tier=decision.tier,
+            rr=gate_rr, confidence=decision.confidence, tier=decision.tier,
         )
         exit_dt, exit_px, reason = _simulate_exit(opt_symbol, trading_date, entry_dt,
                                                     decision.stop, exit_target)
@@ -341,7 +345,17 @@ def summarize(label: str, trades: list[BTTrade]) -> dict:
     print(f"  win_rate={win_rate:.1f}%  total_pnl=Rs.{total_pnl:,.0f}  profit_factor={pf:.2f}")
     if valid:
         print(f"  avg_pnl/trade=Rs.{total_pnl/len(valid):,.0f}")
-    return {"label": label, "n": len(valid), "win_rate": win_rate, "total_pnl": total_pnl, "pf": pf, "unobservable": unobservable}
+
+    # Sensitivity band (REVIEW A2): ~45% of trades are excluded above. Re-add every unobservable
+    # trade as a full stop-out (worst case) so the reader can see whether the conclusion survives
+    # the missing half. If the two profit factors disagree in SIGN of the verdict, don't trust either.
+    unobs = [t for t in trades if t.exit_reason in UNOBSERVABLE_REASONS]
+    worst_loss = sum(abs((t.stop - t.entry) * LOT_SIZE) + COMMISSION for t in unobs)
+    pf_worst = gross_win / (gross_loss + worst_loss) if (gross_loss + worst_loss) else float("inf")
+    if unobs:
+        print(f"  sensitivity: PF={pf:.2f} observed-only  ->  PF={pf_worst:.2f} if all {len(unobs)} unobservable trades were stop-outs")
+    return {"label": label, "n": len(valid), "win_rate": win_rate, "total_pnl": total_pnl, "pf": pf, "pf_worst": pf_worst,
+            "unobservable": unobservable}
 
 
 def main():
@@ -353,6 +367,8 @@ def main():
                          help=f"Minimum decision.rr to take a trade (default: {LIVE_MIN_RR}, the live MIN_RR). 0 disables the gate.")
     parser.add_argument("--compare", action="store_true",
                          help="Run all 4 combinations of exit-field x min-rr-gate side by side, ignoring --exit-field/--min-rr.")
+    parser.add_argument("--sweep", action="store_true",
+                         help="Sweep the MIN_RR gate (on the R:R of the exit actually used) for exit=partial: 0, 0.5, 0.75, 1.0, 1.5, 2.0.")
     args = parser.parse_args()
 
     dates = get_available_days(args.dates or None)
@@ -360,6 +376,19 @@ def main():
         print("No historical days with NIFTY option candle data found.")
         return
     print(f"Replaying {len(dates)} day(s): {dates[0]} -> {dates[-1]}")
+
+    if args.sweep:
+        results = []
+        for gate in (0.0, 0.5, 0.75, 1.0, 1.5, 2.0):
+            trades = run_backtest(dates, "partial", gate)
+            results.append(summarize(f"exit=partial  rr_partial gate {'OFF' if gate == 0 else '>=' + str(gate)}", trades))
+        print("\n" + "=" * 78)
+        print("GATE SWEEP  (exit = partial, gate on partial_pts/risk)")
+        print("=" * 78)
+        for r in results:
+            print(f"  {r['label']:<42} n={r['n']:<4} win%={r['win_rate']:5.1f}  pnl=Rs.{r['total_pnl']:>9,.0f}  "
+                  f"PF={r['pf']:.2f}  worst-case PF={r['pf_worst']:.2f}")
+        return
 
     if args.compare:
         results = []

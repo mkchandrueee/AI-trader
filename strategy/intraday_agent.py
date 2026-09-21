@@ -390,8 +390,15 @@ def run_cycle() -> dict:
             # bucket) lost the most net money despite the highest win rate.
             # Enforcing the engine's own >=1.0 bar here is the minimum bar
             # for taking a trade at all, not a new invented threshold.
-            if decision.get("rr") is not None and decision["rr"] < MIN_RR:
-                _log(symbol, "SKIP", f"{mode}: rr={decision['rr']:.2f} below MIN_RR={MIN_RR}")
+            #
+            # 2026-09-21 review (REVIEW_2026-09-21.md A1): that gate was still
+            # measuring `rr` = target_pts/risk while the agent exits at `partial`,
+            # so it admitted trades whose real R:R was ~0.5 (live book: payoff
+            # 0.55, breakeven win rate 64.6%, actual 50.7%). Gate on `rr_partial`
+            # = partial_pts/risk, the R:R of the trade actually taken.
+            rr_taken = decision.get("rr_partial", decision.get("rr"))
+            if rr_taken is not None and rr_taken == rr_taken and rr_taken < MIN_RR:
+                _log(symbol, "SKIP", f"{mode}: rr_partial={rr_taken:.2f} below MIN_RR={MIN_RR}")
                 continue
 
             with _lock:

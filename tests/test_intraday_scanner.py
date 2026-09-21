@@ -102,9 +102,41 @@ def test_scan_shapes_and_replay_counts_each_setup_once():
     assert res["universe"] == 2 and set(res["setups"]) == set(it.PATTERNS) and res["regime"]["label"] in ("BULLISH", "BEARISH", "CHOPPY")
     rp = it.replay_stats(frames)
     for p, st in rp["patterns"].items():
-        if p in ("orb", "level"):  # constant trigger price -> at most one trade per direction per session
-            assert st["n"] <= 3 * 3 * 2, (p, st)  # 3 symbols x 3 replayable sessions x 2 directions
+        # ONE trade per pattern+direction per symbol-session, for EVERY pattern (box/vwap used to re-trade
+        # ~4-5x a day because their entry price drifts; REVIEW A4)
+        assert st["n"] <= 3 * 3 * 2, (p, st)  # 3 symbols x 3 replayable sessions x 2 directions
         assert st["target_first_pct"] is None or 0 <= st["target_first_pct"] <= 100
+
+
+def _series_for_sim(next_open, next_high, next_low, next_close):
+    """Two-session series whose LAST bar is the fill bar; the signal bar is the one before it."""
+    base = [100.0] * 8 + [100.4, 100.6]
+    s2 = session(D1, base + [next_close])
+    s2.loc[len(s2) - 1, ["open", "high", "low", "close"]] = [next_open, next_high, next_low, next_close]
+    s = it.Series.from_df("T", frame(PREV, s2))
+    return s, len(s.c) - 2, len(s.c)
+
+
+def test_costs_are_realistic_and_gaps_are_counted_not_dropped():
+    assert it.COST_PCT + it.SLIPPAGE_PCT >= 0.0015          # ~0.15%: brokerage+STT+charges+slippage
+    tot = it.COST_PCT + it.SLIPPAGE_PCT
+    long_setup = {"state": "breakout", "stop": 99.5, "target": 101.5}
+    s, i, end = _series_for_sim(next_open=98.0, next_high=98.5, next_low=97.5, next_close=98.0)   # gaps THROUGH the stop
+    pnl, r, why = it._simulate(s, i, long_setup, end)
+    assert why == "gap_stop" and r == 0.0 and abs(pnl + tot) < 1e-12
+    s, i, end = _series_for_sim(next_open=102.0, next_high=102.5, next_low=101.8, next_close=102.2)  # gaps PAST the target
+    pnl, r, why = it._simulate(s, i, long_setup, end)
+    assert why == "gap_target" and r == 0.0 and abs(pnl + tot) < 1e-12
+    s, i, end = _series_for_sim(next_open=100.6, next_high=101.6, next_low=100.5, next_close=101.5)  # a clean target hit
+    pnl, r, why = it._simulate(s, i, long_setup, end)
+    assert why == "target" and abs(pnl - ((101.5 - 100.6) / 100.6 - tot)) < 1e-9
+
+
+def test_engine_rr_partial_is_the_rr_the_agent_takes():
+    from strategy.math_decision_strategy import analyse_option_pair
+    d = analyse_option_pair((127, 149, 118, 127), (88, 99, 79, 95))
+    assert d.risk == 23.0 and d.rr == 0.87                   # reference-tool parity figure, unchanged
+    assert d.rr_partial == round(10 / 23.0, 2) == 0.43       # exits at entry+10, so this is what is actually risked
 
 
 if __name__ == "__main__":
