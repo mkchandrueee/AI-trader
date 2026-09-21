@@ -2256,6 +2256,15 @@ def _ensure_collector():
     if now.weekday() >= 5 or not (9 <= now.hour < 16):
         return
 
+    # Pre-open: collect_ticks.py deliberately sleeps until 09:14 and writes no price
+    # cache until its stream starts, so "cache is old" is EXPECTED here. Without this
+    # guard every 30s cycle from 09:00 killed and respawned the collector, and each
+    # respawn logged into mStock AND AngelOne again -- ~28 logins before the bell,
+    # which got AngelOne's historical endpoint answering with empty bodies (2026-09-21).
+    # Leave a collector we spawned alone until the open + 1 minute of grace.
+    if (now.hour, now.minute) < (9, 16) and _collector_process is not None and _collector_process.poll() is None:
+        return
+
     # Price freshness is the single source of truth — check it first.
     # A process can be "running" but have a stalled WebSocket writing stale prices.
     if _cache_prices_are_fresh():
