@@ -433,7 +433,9 @@ def scan(frames: dict[str, pd.DataFrame], now, industries: Optional[dict[str, st
             built.append((sym, s))
     # A symbol whose newest bar is behind the freshest one (a previous session, or more than one bar back) is STALE:
     # analysing it as "current" would mix yesterday's setups into today's scan. Report it, never scan it.
-    freshest = max((pd.Timestamp(s.t[-1]) for _, s in built), default=None)
+    # The reference is the freshest STOCK bar. The index series must not set it: NIFTY futures bars run to 15:40 while
+    # stocks end at 15:25, which made every stock look 3 bars stale after the close (found on the first restart).
+    freshest = max((pd.Timestamp(s.t[-1]) for sym, s in built if sym != index_symbol), default=None)
     stale: list[str] = []
     for sym, s in built:
         if freshest is not None and pd.Timestamp(s.t[-1]) < freshest - pd.Timedelta(minutes=BAR_MIN):

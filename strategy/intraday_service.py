@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -150,6 +150,9 @@ def _reconcile(index_df: Optional[pd.DataFrame], now: datetime) -> Optional[dict
     try:
         from database.db import read_sql
         done = isc.completed_only(index_df, now)
+        # NIFTY futures print bars to 15:40 but our tick collector stops at the 15:30 close: compare only bars that
+        # exist on both sides (found on the first after-hours restart, which tried to match the 15:40 bar).
+        done = done[done["timestamp"].dt.time <= dtime(15, 25)] if not done.empty else done
         if done.empty:
             return None
         last = done.iloc[-1]

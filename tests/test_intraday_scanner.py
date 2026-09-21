@@ -139,6 +139,19 @@ def test_engine_rr_partial_is_the_rr_the_agent_takes():
     assert d.rr_partial == round(10 / 23.0, 2) == 0.43       # exits at entry+10, so this is what is actually risked
 
 
+def test_index_bars_running_later_do_not_make_stocks_stale():
+    """NIFTY futures trade to 15:40, stocks to 15:25: the index must not become the 'freshest bar' reference."""
+    days = [datetime(2026, 9, 17).date(), datetime(2026, 9, 18).date()]
+    stock = frame(*[session(d, list(np.linspace(100, 101, 75))) for d in days])            # last bar 15:25
+    index = frame(*[session(d, list(np.linspace(23000, 23050, 78))) for d in days])        # last bar 15:40
+    now = datetime(2026, 9, 18, 22, 0)
+    res = it.scan({"AAA": stock, "NIFTY-I": index}, now, {}, "NIFTY-I")
+    assert res["stale"] == [] and res["universe"] == 1 and res["asof_bar"].endswith("15:25:00")
+    lagging = frame(*[session(d, list(np.linspace(100, 101, 75))) for d in days[:1]])       # a stock stuck on the PREVIOUS session
+    res = it.scan({"AAA": stock, "BBB": lagging, "NIFTY-I": index}, now, {}, "NIFTY-I")
+    assert res["stale"] == ["BBB"] and res["universe"] == 1
+
+
 def test_cache_currency_and_last_session_day():
     from strategy import intraday_service as svc
     mon_eve = datetime(2026, 9, 21, 22, 28)
