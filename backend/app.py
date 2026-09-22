@@ -242,6 +242,7 @@ LIVE_CACHE_FILE = "/tmp/td_live_prices.json"
 # Background processes
 _tick_monitor_thread = None
 _collector_process = None
+_collector_spawned_at = 0.0  # time.time() of the last Popen -- see _ensure_collector's startup-grace guard
 _tick_monitor_rest_ts: dict = {}  # symbol -> last REST fallback timestamp
 
 predictor = Predictor()
@@ -2233,22 +2234,71 @@ def _kill_stalled_collector():
         import subprocess as sp
         import platform
         if platform.system() == "Windows":
+            filt = "CommandLine LIKE '%collect_ticks.py%'"
             sp.run(
                 ["powershell", "-NoProfile", "-Command",
-                 "Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%collect_ticks.py%'\" "
+                 f"Get-CimInstance Win32_Process -Filter \"{filt}\" "
                  "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"],
                 capture_output=True, timeout=10,
             )
+            # Verify the kill actually landed instead of assuming it did (see below): 2026-09-07 through
+            # 2026-09-18's trading.log shows hundreds of "stale, killing and restarting" events some days
+            # with almost no matching "atexit: disconnecting" lines -- strong evidence this sweep was
+            # silently matching zero processes on at least some of those days, so respawned collectors
+            # piled up on top of still-alive ones instead of replacing them. Each pile-up forces a FRESH
+            # mStock login (mStock enforces one session per login -- see
+            # strategy/premarket._get_mstock_client's docstring for the same failure mode elsewhere),
+            # which invalidates whichever older process's mStock WebSocket was still connected, while
+            # AngelOne's already-open sockets are not torn down the same way -- so a silent kill failure
+            # starves mStock of tick coverage specifically, without ever showing up as an AngelOne problem.
+            for attempt in range(5):
+                time.sleep(1)
+                check = sp.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     f"(Get-CimInstance Win32_Process -Filter \"{filt}\").Count"],
+                    capture_output=True, timeout=10, text=True,
+                )
+                survivors = (check.stdout or "").strip()
+                if survivors in ("", "0"):
+                    return
+            logger.warning(
+                f"_kill_stalled_collector: {survivors} collect_ticks.py process(es) still running after the "
+                "kill sweep -- a new one will be spawned ON TOP of them. This is the exact condition that "
+                "starves mStock of ticks (see comment above); investigate rather than ignore."
+            )
         else:
             sp.run(["pkill", "-f", "collect_ticks.py"], capture_output=True, timeout=10)
-        time.sleep(1)
+            time.sleep(1)
     except Exception:
         pass
 
 
+COLLECTOR_STARTUP_GRACE_SECS = 150  # see the guard below
+_collector_lock = threading.Lock()
+
+
 def _ensure_collector():
     """Auto-start collect_ticks.py if it's market hours and not delivering fresh prices."""
-    global _collector_process
+    global _collector_process, _collector_spawned_at
+    import subprocess
+
+    # _ensure_collector() is called from multiple threads close together on a cold start (the main thread
+    # right before app.run(), and background_scanner's very first loop iteration, which has no initial
+    # sleep) -- confirmed live 2026-09-22 09:09:50: both calls saw _collector_process as None (the other's
+    # Popen() hadn't been assigned back to the global yet) and each spawned its own collect_ticks.py, two
+    # processes 0 seconds apart. Since mStock enforces one session per login, the second process's mStock
+    # login very likely kicked the first one's mStock WebSocket immediately -- on EVERY cold start, not
+    # just during a stale-price storm. Serializing the whole check-and-spawn removes the race.
+    if not _collector_lock.acquire(blocking=False):
+        return  # another thread is already inside this function; don't pile another spawn decision on top
+    try:
+        _ensure_collector_locked()
+    finally:
+        _collector_lock.release()
+
+
+def _ensure_collector_locked():
+    global _collector_process, _collector_spawned_at
     import subprocess
 
     now = datetime.now()
@@ -2256,14 +2306,28 @@ def _ensure_collector():
     if now.weekday() >= 5 or not (9 <= now.hour < 16):
         return
 
-    # Pre-open: collect_ticks.py deliberately sleeps until 09:14 and writes no price
-    # cache until its stream starts, so "cache is old" is EXPECTED here. Without this
-    # guard every 30s cycle from 09:00 killed and respawned the collector, and each
-    # respawn logged into mStock AND AngelOne again -- ~28 logins before the bell,
-    # which got AngelOne's historical endpoint answering with empty bodies (2026-09-21).
-    # Leave a collector we spawned alone until the open + 1 minute of grace.
-    if (now.hour, now.minute) < (9, 16) and _collector_process is not None and _collector_process.poll() is None:
-        return
+    # Startup grace: a freshly spawned collector must authenticate mStock AND AngelOne, resolve today's
+    # ATM options, connect two WebSockets and only THEN start writing the price cache -- confirmed live
+    # (2026-09-18 09:22-09:51) that this can take 30-90s under any broker slowness/rate-limiting, well
+    # past this function's own 30s call cadence (background_scanner). Judging it "stale" before it has
+    # had a real chance to start just kills and respawns it again mid-startup -- that day's log shows 40+
+    # full restart banners in 29 minutes, almost none followed by a clean "atexit: disconnecting", meaning
+    # the kills mostly failed and processes piled up (see _kill_stalled_collector). Each respawn is a FRESH
+    # mStock login, and mStock enforces one session per login, so every pile-up silently kicks whichever
+    # older process's mStock WebSocket was still alive -- while AngelOne's already-open sockets are not
+    # torn down the same way. That is why mStock's tick coverage looked worse than AngelOne's: not a
+    # data-quality problem with mStock itself, but this restart storm starving it specifically.
+    # This used to only guard the pre-open window (< 9:16); it now applies at any time of day, because the
+    # same slow-startup-into-premature-kill sequence can happen whenever the collector (re)starts, not just
+    # at the open. The grace clock starts at whichever is LATER: the actual spawn time, or market open
+    # (09:15) -- a collector spawned at 09:00 does no real work (and writes no cache file) until it wakes
+    # at 09:14-09:15, so its grace window must cover the wait too, not just the 2 minutes after 09:00.
+    if _collector_process is not None and _collector_process.poll() is None:
+        from datetime import time as _dtime
+        market_open_today = datetime.combine(now.date(), _dtime(9, 15))
+        effective_start = max(_collector_spawned_at, market_open_today.timestamp())
+        if time.time() - effective_start < COLLECTOR_STARTUP_GRACE_SECS:
+            return
 
     # Price freshness is the single source of truth — check it first.
     # A process can be "running" but have a stalled WebSocket writing stale prices.
@@ -2287,6 +2351,7 @@ def _ensure_collector():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        _collector_spawned_at = time.time()
         logger.info(f"collect_ticks.py started (PID={_collector_process.pid})")
 
 
@@ -2590,6 +2655,26 @@ def api_live_prices():
                         "hint": "Start collect_ticks.py to enable live tick prices"})
     except Exception as e:
         return jsonify({"prices": {}, "age_seconds": None, "source": "error", "error": str(e)})
+
+
+@app.route("/api/live/tick-sources")
+def api_live_tick_sources():
+    """
+    Per-broker tick counts for the CURRENT collect_ticks.py process (mstock vs angelone), written by
+    scripts/collect_ticks.py alongside the price cache. tick_data has no source column, so this is the
+    only direct way to compare the two feeds -- added 2026-09-22 after evidence that a restart-storm bug
+    (see _ensure_collector's docstring) was silently starving mStock specifically. Counts reset whenever
+    the collector restarts, so "since" tells the caller how far back the comparison is valid for.
+    """
+    SOURCE_STATS_FILE = "/tmp/td_tick_sources.json"
+    try:
+        mtime = os.path.getmtime(SOURCE_STATS_FILE)
+        stats = json.loads(open(SOURCE_STATS_FILE).read())
+        return jsonify({"stats": stats, "age_seconds": round(time.time() - mtime, 1)})
+    except FileNotFoundError:
+        return jsonify({"stats": None, "age_seconds": None, "hint": "collect_ticks.py is not running"})
+    except Exception as e:
+        return jsonify({"stats": None, "age_seconds": None, "error": str(e)})
 
 
 @app.route("/api/stream")

@@ -231,9 +231,17 @@ class MStockMarketData:
     ) -> pd.DataFrame:
         from datetime import timedelta
         end = datetime.now()
-        # Generous lookback window so n bars are actually available even
-        # across a weekend/holiday gap; trimmed to the last n rows below.
-        start = end - timedelta(days=5)
+        # A flat 5-day window at interval="1min" implies well over 1000 candles, which mStock's
+        # getHistoricalChart rejects outright ("Requested data exceeds the maximum limit of 1000 candles") --
+        # confirmed live: every collect_ticks.py startup hit this on its n=1 NIFTY-I reference-price call
+        # (2026-09-18, 2026-09-22), silently falling back to AngelOne and adding ~1s of dead time to every
+        # collector (re)start. data/multi_source_market_data.py's MultiSourceMarketData.fetch_last_n_bars()
+        # already sizes its window this same safe way -- match it here for the class that method wraps.
+        if interval == "day":
+            lookback_days = n + 5  # n is already in days; +5 covers weekends/holidays
+        else:
+            lookback_days = max(1, (n // 375) + 2)  # ~375 minute-bars/trading day, +2 covers a weekend gap
+        start = end - timedelta(days=lookback_days)
         df = self.fetch_historical_bars(symbol, start, end, interval, exchange)
         return df.tail(n).reset_index(drop=True) if not df.empty else df
 

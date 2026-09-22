@@ -19,6 +19,19 @@ interface BrokerAuthStatus {
   trade_mode?: string;
 }
 
+interface TickSourceCounts {
+  ticks: number;
+  symbols: number;
+  last_tick_ts: string | null;
+  connected: boolean;
+}
+interface TickSourcesResponse {
+  stats: { mstock: TickSourceCounts; angelone: TickSourceCounts; started_at: string | null; written_at: string } | null;
+  age_seconds: number | null;
+  hint?: string;
+  error?: string;
+}
+
 export default function SettingsPage() {
   const [profiles, setProfiles] = useState<Record<RiskLevel, RiskProfile> | null>(null);
   const [activeRisk, setActiveRisk] = useState<RiskLevel>("medium");
@@ -37,6 +50,8 @@ export default function SettingsPage() {
   const [mstockConnecting, setMstockConnecting] = useState(false);
   const [mstockConnectError, setMstockConnectError] = useState<string | null>(null);
 
+  const [tickSources, setTickSources] = useState<TickSourcesResponse | null>(null);
+
   const load = useCallback(async () => {
     const p = await fetchJSON<Record<RiskLevel, RiskProfile>>("/api/risk/profiles").catch(() => null);
     if (p) setProfiles(p as Record<RiskLevel, RiskProfile>);
@@ -48,6 +63,13 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => { load(); loadBrokerStatus(); }, [load, loadBrokerStatus]);
+
+  useEffect(() => {
+    const poll = () => fetchJSON<TickSourcesResponse>("/api/live/tick-sources").then(setTickSources).catch(() => null);
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
 
   const connectAngelOne = async () => {
     setConnecting(true);
@@ -318,6 +340,81 @@ export default function SettingsPage() {
                   <span className="text-[11px]" style={{ color: '#ff3e3e' }}>{mstockConnectError}</span>
                 )}
               </div>
+            </>
+          )}
+        </div>
+
+        {/* Live Tick Sources — direct mStock vs AngelOne comparison. tick_data has no source column, so this
+            (read from scripts/collect_ticks.py's own counters) is the only place that answers "which broker
+            is actually delivering ticks right now" instead of guessing from aggregate row counts. */}
+        <div className="t-panel p-5 mb-4">
+          <h2 className="text-[12px] font-bold uppercase tracking-wider mb-1" style={{ color: '#c8cdd5' }}>Live Tick Sources</h2>
+          <p className="text-[10px] mb-4" style={{ color: '#5a6270' }}>
+            Ticks received by the current collect_ticks.py process, counted separately per broker (both feed the
+            same database — this is the only live comparison between them). Counts reset every time the collector
+            restarts.
+          </p>
+          {!tickSources?.stats ? (
+            <p className="text-[11px]" style={{ color: '#5a6270' }}>
+              {tickSources?.hint || tickSources?.error || "Loading…"}
+            </p>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                {(["mstock", "angelone"] as const).map((src) => {
+                  const s = tickSources.stats![src];
+                  const label = src === "mstock" ? "mStock" : "AngelOne";
+                  const ageSecs = s.last_tick_ts ? (Date.now() - new Date(s.last_tick_ts).getTime()) / 1000 : null;
+                  const healthy = s.connected && ageSecs !== null && ageSecs < 30;
+                  return (
+                    <div key={src} className="p-3" style={{ background: '#0e1117', border: '1px solid #252a33' }}>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: '#c8cdd5' }}>{label}</span>
+                        <span
+                          className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-[2px]"
+                          style={{
+                            color: healthy ? '#00e87b' : s.connected ? '#e8c300' : '#5a6270',
+                            border: `1px solid ${healthy ? '#00e87b' : s.connected ? '#e8c300' : '#5a6270'}`,
+                          }}
+                        >
+                          {s.connected ? (healthy ? "Live" : "Connected, quiet") : "Disconnected"}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div>
+                          <div className="text-[16px] font-bold" style={{ color: '#c8cdd5' }}>{s.ticks.toLocaleString()}</div>
+                          <div className="text-[8px] uppercase tracking-wider" style={{ color: '#5a6270' }}>Ticks</div>
+                        </div>
+                        <div>
+                          <div className="text-[16px] font-bold" style={{ color: '#c8cdd5' }}>{s.symbols}</div>
+                          <div className="text-[8px] uppercase tracking-wider" style={{ color: '#5a6270' }}>Symbols</div>
+                        </div>
+                        <div>
+                          <div className="text-[16px] font-bold" style={{ color: ageSecs === null ? '#5a6270' : ageSecs < 10 ? '#00e87b' : '#e8c300' }}>
+                            {ageSecs === null ? "—" : `${Math.round(ageSecs)}s`}
+                          </div>
+                          <div className="text-[8px] uppercase tracking-wider" style={{ color: '#5a6270' }}>Last tick</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {(() => {
+                const ms = tickSources.stats!.mstock, ang = tickSources.stats!.angelone;
+                const total = ms.ticks + ang.ticks;
+                if (total === 0) {
+                  return <p className="text-[10px]" style={{ color: '#5a6270' }}>No ticks yet this session.</p>;
+                }
+                const msShare = Math.round((100 * ms.ticks) / total);
+                const lopsided = msShare <= 15 || msShare >= 85;
+                return (
+                  <p className="text-[10px]" style={{ color: lopsided ? '#e8c300' : '#5a6270' }}>
+                    Share of ticks this session: mStock {msShare}% / AngelOne {100 - msShare}%.
+                    {lopsided && " One source is doing almost all the work — if that's mStock at the low end, check the connection or logs/tick_collector_*.log for repeated re-logins."}
+                  </p>
+                );
+              })()}
             </>
           )}
         </div>

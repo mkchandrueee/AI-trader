@@ -50,6 +50,7 @@ fix_windows_console_encoding()
 from dotenv import load_dotenv
 load_dotenv()
 
+import functools
 import json
 import threading
 import pandas as pd
@@ -92,6 +93,18 @@ running = True
 live_price_cache: dict = {}
 LIVE_CACHE_FILE = Path("/tmp/td_live_prices.json")
 
+# Per-source tick counters, written alongside the price cache so the backend/dashboard can show a direct
+# mStock-vs-AngelOne comparison instead of guessing from tick_data (which has no source column). Added
+# 2026-09-22 after finding the restart-storm bug that was starving mStock specifically (see
+# backend/app.py's _ensure_collector docstring) -- this makes any FUTURE regression visible immediately
+# instead of requiring another log-archaeology session to notice.
+SOURCE_STATS_FILE = Path("/tmp/td_tick_sources.json")
+tick_source_stats: dict = {
+    "mstock": {"ticks": 0, "symbols": set(), "last_tick_ts": None},
+    "angelone": {"ticks": 0, "symbols": set(), "last_tick_ts": None},
+}
+tick_source_stats_started_at = None  # set once streaming actually starts, so counts can be turned into a rate
+
 # Watchdog: track when we last received a real tick (not a heartbeat)
 last_tick_received_time: float = time.time()
 
@@ -120,9 +133,13 @@ def _atexit_cleanup():
             md_mstock.ws_disconnect()
     except Exception as e:
         logger.debug(f"atexit cleanup error (mStock): {e}")
-    # Clean up cache file
+    # Clean up cache files
     try:
         LIVE_CACHE_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        SOURCE_STATS_FILE.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -259,6 +276,20 @@ def _flush_price_cache():
             tmp.replace(LIVE_CACHE_FILE)
         except Exception as e:
             logger.error(f"Failed to write live price cache: {e}")
+        try:
+            payload = {
+                src: {"ticks": st["ticks"], "symbols": len(st["symbols"]), "last_tick_ts": st["last_tick_ts"]}
+                for src, st in tick_source_stats.items()
+            }
+            payload["mstock"]["connected"] = bool(md_mstock and md_mstock.is_ws_connected)
+            payload["angelone"]["connected"] = bool(td and getattr(td, "_ws_connected", False))
+            payload["started_at"] = tick_source_stats_started_at
+            payload["written_at"] = datetime.now().isoformat()
+            tmp2 = SOURCE_STATS_FILE.with_suffix(".tmp")
+            tmp2.write_text(json.dumps(payload))
+            tmp2.replace(SOURCE_STATS_FILE)
+        except Exception as e:
+            logger.error(f"Failed to write tick source stats: {e}")
         time.sleep(1)
 
 
@@ -329,7 +360,7 @@ def flush_remaining_candles():
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    global td, md_mstock, collector, running, last_tick_received_time
+    global td, md_mstock, collector, running, last_tick_received_time, tick_source_stats_started_at
 
     parser = argparse.ArgumentParser(description="Automated tick collector")
     parser.add_argument("--test", action="store_true", help="Test connection only")
@@ -478,15 +509,20 @@ def main():
         td.ws_subscribe(subscribe_symbols)
 
     # Start streaming with our tick handler
-    def combined_handler(tick):
-        """Feed tick to both collector (DB persistence) and candle aggregator."""
+    def combined_handler(tick, source: str):
+        """Feed tick to both collector (DB persistence) and candle aggregator, and count it per source."""
+        st = tick_source_stats[source]
+        st["ticks"] += 1
+        st["symbols"].add(tick.get("symbol", ""))
+        st["last_tick_ts"] = datetime.now().isoformat()
         collector.on_tick(tick)
         on_tick(tick)
 
     if md_mstock:
-        md_mstock.ws_start_streaming(combined_handler)
+        md_mstock.ws_start_streaming(functools.partial(combined_handler, source="mstock"))
     if td:
-        td.ws_start_streaming(combined_handler)
+        td.ws_start_streaming(functools.partial(combined_handler, source="angelone"))
+    tick_source_stats_started_at = datetime.now().isoformat()
 
     # Start background thread to flush live price cache to disk every second
     cache_thread = threading.Thread(target=_flush_price_cache, daemon=True)
@@ -560,10 +596,13 @@ def main():
         # Periodic status
         current_count = len(collector._buffer)
         if current_count > 0 or tick_count_last > 0:
+            ms, ang = tick_source_stats["mstock"], tick_source_stats["angelone"]
             logger.info(
                 f"Status: buffer={current_count} ticks, "
                 f"candle_symbols={len(candle_buffer)}, "
                 f"secs_since_last_tick={secs_since_tick:.0f}, "
+                f"mstock={ms['ticks']} ticks/{len(ms['symbols'])} symbols, "
+                f"angelone={ang['ticks']} ticks/{len(ang['symbols'])} symbols, "
                 f"time={datetime.now().strftime('%H:%M:%S')}"
             )
         tick_count_last = current_count
