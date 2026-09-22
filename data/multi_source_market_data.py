@@ -1,5 +1,14 @@
 """
 Multi-Source Market Data — mStock primary, AngelOne fallback
+
+NOT currently used. As of 2026-09-22 every former caller
+(scripts/backfill_today.py, backfill_history.py, backfill_option_days.py,
+fetch_missing_ticks.py) constructs data/market_data_adapter.py's
+MarketDataAdapter directly instead -- market data is AngelOne-only now,
+mStock is order execution only (broker/mstock_adapter.py). See
+data/mstock_market_data.py's module docstring for why the mstock-primary
+direction was reversed. Kept in place, unused, in case dual-source market
+data is revisited later.
 ───────────────────────────────────────────────────────────
 A drop-in replacement for data/market_data_adapter.py's MarketDataAdapter,
 same public interface (authenticate/fetch_historical_bars/
@@ -7,7 +16,7 @@ fetch_last_n_bars), for callers that want automatic failover instead of
 picking one broker directly.
 
 Tries mStock (data/mstock_market_data.py's MStockMarketData) first, per
-the user's "mstock as primary" direction; falls back to AngelOne
+the user's former "mstock as primary" direction; falls back to AngelOne
 (data/market_data_adapter.py's MarketDataAdapter) on any failure --
 mStock's historical-candle REST path is newer and less proven than
 AngelOne's, so a clean fallback matters here more than it would the other

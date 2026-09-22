@@ -2657,26 +2657,6 @@ def api_live_prices():
         return jsonify({"prices": {}, "age_seconds": None, "source": "error", "error": str(e)})
 
 
-@app.route("/api/live/tick-sources")
-def api_live_tick_sources():
-    """
-    Per-broker tick counts for the CURRENT collect_ticks.py process (mstock vs angelone), written by
-    scripts/collect_ticks.py alongside the price cache. tick_data has no source column, so this is the
-    only direct way to compare the two feeds -- added 2026-09-22 after evidence that a restart-storm bug
-    (see _ensure_collector's docstring) was silently starving mStock specifically. Counts reset whenever
-    the collector restarts, so "since" tells the caller how far back the comparison is valid for.
-    """
-    SOURCE_STATS_FILE = "/tmp/td_tick_sources.json"
-    try:
-        mtime = os.path.getmtime(SOURCE_STATS_FILE)
-        stats = json.loads(open(SOURCE_STATS_FILE).read())
-        return jsonify({"stats": stats, "age_seconds": round(time.time() - mtime, 1)})
-    except FileNotFoundError:
-        return jsonify({"stats": None, "age_seconds": None, "hint": "collect_ticks.py is not running"})
-    except Exception as e:
-        return jsonify({"stats": None, "age_seconds": None, "error": str(e)})
-
-
 @app.route("/api/stream")
 def api_stream():
     """

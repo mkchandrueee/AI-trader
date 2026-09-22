@@ -223,34 +223,35 @@ token, resolved via `data/mstock_symbols.py` from mStock's own
 `get_instruments()` (requires an authenticated session, unlike AngelOne's
 anonymous public dump).
 
-**Order execution**: set `TRADE_MODE=mstock` to route orders through it,
-independent of `TRADE_MODE`, market data is now dual-source, mStock
-primary / AngelOne fallback:
-- **Live WebSocket ticks**: `scripts/collect_ticks.py` connects both
-  `data/mstock_market_data.py`'s `MStockMarketData` (primary) and
-  `data/market_data_adapter.py`'s `MarketDataAdapter` (redundant) at
-  market open, feeding the same `on_tick()` handler — live-verified, real
-  ticks flowing from both.
-- **Historical option-candle fetches**: `data/multi_source_market_data.py`'s
-  `MultiSourceMarketData` is a drop-in replacement for `MarketDataAdapter`
-  (tries mStock first, falls back to AngelOne on any failure, tags
-  `df.attrs["source"]`) — used by the bulk backfill scripts
-  (`backfill_today.py`, `backfill_option_days.py`, `backfill_history.py`,
-  `fetch_missing_ticks.py`'s candle path). `strategy/premarket.py`'s
-  `_fetch_option_candle()` (the live agent's real-time decision path) has
-  its own equivalent dual-fetch, since it needs AngelOne's live-resolved
-  tradingsymbol for the AngelOne leg specifically (the DB-alias format
-  silently fails for today's freshest contracts there — see that
-  function's docstring) alongside mStock's DB-alias-resolved leg.
-- **Historical tick-level data**: neither broker has this endpoint
-  (AngelOne's free-tier gap; mStock doesn't even stub the method) —
-  `fetch_historical_ticks()` always returns empty on both sides.
-- **Symbol resolution for market data is broker-specific and NOT
-  interchangeable**: mStock's real tradingsymbol convention
-  (`NIFTY2692229450CE`, single-digit month code for weeklies) differs
-  from AngelOne's (`NIFTY08SEP2622100PE`) for the same contract — don't
-  pass one broker's resolved symbol string into the other's
-  `fetch_historical_bars()`.
+**Order execution**: set `TRADE_MODE=mstock` to route orders through it.
+Market data is AngelOne-only, independent of `TRADE_MODE` — the original
+split, restored 2026-09-22 after a brief period (roughly 09-18 to 09-22)
+where market data was dual-source, mStock-primary:
+- **Live WebSocket ticks**: `scripts/collect_ticks.py` used to connect both
+  `data/mstock_market_data.py`'s `MStockMarketData` and
+  `data/market_data_adapter.py`'s `MarketDataAdapter` at market open,
+  feeding the same `on_tick()` handler. Removed after finding a restart-
+  storm bug (`backend/app.py`'s `_ensure_collector` — a collector spawn
+  race plus an unreliable Windows process kill let duplicate
+  `collect_ticks.py` processes pile up) was silently starving mStock's
+  feed specifically: mStock enforces one session per login, so every
+  duplicate process's fresh mStock login kicked whichever older process's
+  mStock WebSocket was still connected, while AngelOne's already-open
+  sockets were not torn down the same way. Even after that bug was fixed,
+  mStock's tick rate stayed a fraction of AngelOne's for reasons that
+  weren't further chased down (see `git log` around 2026-09-22 for the
+  investigation) — AngelOne alone is now the sole live-tick source.
+- **Historical option-candle fetches**: `data/market_data_adapter.py`'s
+  `MarketDataAdapter` directly, everywhere (the bulk backfill scripts —
+  `backfill_today.py`, `backfill_option_days.py`, `backfill_history.py`,
+  `fetch_missing_ticks.py`'s candle path — and `strategy/premarket.py`'s
+  `_fetch_option_candle()`, the live agent's real-time decision path, via
+  the shared session in `data/live_bars.py`). `data/mstock_market_data.py`
+  (`MStockMarketData`) and `data/multi_source_market_data.py`
+  (`MultiSourceMarketData`) still exist and still work, just unused by the
+  live pipeline — kept in case dual-source market data is revisited.
+- **Historical tick-level data**: AngelOne has no free-tier endpoint for
+  this — `fetch_historical_ticks()` always returns empty.
 
 ---
 

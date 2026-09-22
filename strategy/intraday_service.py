@@ -2,8 +2,9 @@
 Live-sync layer for the Intraday Engine (strategy/intraday_scanner.py).
 
 Accuracy rules this module enforces:
-  * Bars come from the brokers' own candle endpoints, mStock first / AngelOne
-    fallback (data/live_bars.py), through ONE shared session per broker.
+  * Bars come from AngelOne's own candle endpoint (data/live_bars.py), through
+    ONE shared session for the whole process. mStock is order execution only
+    (broker/mstock_adapter.py) -- see CLAUDE.md's mStock section.
   * The engine analyses COMPLETED 5-minute bars only. A background thread
     refreshes a few seconds after each bar closes (09:20:08, 09:25:08, ...) so
     the newest closed bar is normally in the scan within ~30 seconds.
@@ -203,7 +204,7 @@ def _sync_once(reason: str) -> None:
             sources["cache"] = sources.get("cache", 0) + 1
             ok += 1
             continue
-        df, src, probs = fetch_bars(inst, start_today if have_history else start_full, now, "5min", today_only=have_history)
+        df, src, probs = fetch_bars(inst, start_today if have_history else start_full, now, "5min")
         if df is None:
             failed.append(inst.symbol)
             problems.extend(f"{inst.symbol} {p}" for p in probs[:2])

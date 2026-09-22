@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Backfill the last N trading days of NIFTY-I + ATM option 1-min candles
-(mStock primary, AngelOne fallback via MultiSourceMarketData -- see
-data/multi_source_market_data.py) — for populating the Charts page (and
-anything else that reads minute_candles) when the DB is empty or has gaps
-older than today (backfill_today.py only covers today).
+Backfill the last N trading days of NIFTY-I + ATM option 1-min candles via
+AngelOne (market data source -- mStock is order execution only, see
+CLAUDE.md's mStock section) — for populating the Charts page (and anything
+else that reads minute_candles) when the DB is empty or has gaps older than
+today (backfill_today.py only covers today).
 
 Usage: python scripts/backfill_history.py --days 10
 """
@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from data.multi_source_market_data import MultiSourceMarketData
+from data.market_data_adapter import MarketDataAdapter
 from database.db import upsert_candles, read_sql
 from utils.logger import get_logger
 
@@ -30,9 +30,9 @@ def backfill_history(days: int, strikes_each_side: int = 3):
     start = end - timedelta(days=days)
     print(f"Backfilling {days} calendar days: {start.date()} -> {end.date()}")
 
-    td = MultiSourceMarketData()
+    td = MarketDataAdapter()
     if not td.authenticate():
-        print("ERROR: both mStock and AngelOne authentication failed.")
+        print("ERROR: AngelOne authentication failed.")
         return 1
 
     print("Fetching NIFTY-I 1-min candles...")

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from data.multi_source_market_data import MultiSourceMarketData
+from data.market_data_adapter import MarketDataAdapter
 from database.db import upsert_candles, read_sql
 from backtest.option_resolver import get_nearest_expiry, build_option_symbol
 from utils.logger import get_logger
@@ -57,7 +57,7 @@ def get_nifty_close_for_date(dt_str: str) -> float:
     return float(df.iloc[0]["close"])
 
 
-def backfill_day(td: MultiSourceMarketData, day_str: str):
+def backfill_day(td: MarketDataAdapter, day_str: str):
     """Fetch and store option premium bars for a single day."""
     day = datetime.strptime(day_str, "%Y-%m-%d").date()
     nifty_close = get_nifty_close_for_date(day_str)
@@ -134,10 +134,10 @@ def main():
     for d in days:
         print(f"  {d}")
 
-    # mStock primary, AngelOne fallback (data/multi_source_market_data.py)
-    td = MultiSourceMarketData()
+    # AngelOne -- market data source (mStock is order execution only, see CLAUDE.md's mStock section)
+    td = MarketDataAdapter()
     if not td.authenticate():
-        print("ERROR: both mStock and AngelOne authentication failed.")
+        print("ERROR: AngelOne authentication failed.")
         return
 
     print(f"\nFetching ATM±{N_STRIKES} strikes (CE+PE) = {(2*N_STRIKES+1)*2} symbols per day\n")

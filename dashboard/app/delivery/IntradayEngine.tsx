@@ -338,7 +338,7 @@ export default function IntradayEngine() {
           <div>
             <div className="text-[11px] font-bold uppercase tracking-wider" style={{ color: C.blue }}>Intraday Engine</div>
             <p className="text-[10px] mt-0.5 max-w-3xl" style={{ color: C.dim }}>
-              NIFTY 50 stocks + NIFTY futures on <b>completed 5-minute bars</b> pulled from the brokers (mStock first, AngelOne fallback) and refreshed a few seconds after every bar closes.
+              NIFTY 50 stocks + NIFTY futures on <b>completed 5-minute bars</b> pulled from AngelOne and refreshed a few seconds after every bar closes.
               A candle still forming is never analysed. Rules are our own plus ChartBank&apos;s 30-minute hammer; every scorecard is measured on our own history. Suggest-only — no orders.
             </p>
           </div>

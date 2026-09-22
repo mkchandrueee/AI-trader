@@ -1,13 +1,24 @@
 """
-mStock Market Data Client
-──────────────────────────
+mStock Market Data Client — NOT currently wired into the live pipeline.
+
+As of 2026-09-22, market data is AngelOne-only (data/market_data_adapter.py
+directly, or the shared session in data/live_bars.py); mStock is order
+execution only, via the separate broker/mstock_adapter.py. This file used to
+be used by scripts/collect_ticks.py, strategy/premarket.py and
+data/multi_source_market_data.py as a first-tried/primary market-data
+source; that direction was reversed after a restart-storm bug (see
+backend/app.py's _ensure_collector docstring) turned out to be starving
+mStock's WebSocket via its single-session-per-login policy, and mStock's
+own historical endpoint proved to have little practical benefit (it served
+past sessions fine but nothing for the current session). Kept in place,
+unused, in case dual-source market data is revisited later — nothing
+currently imports MStockMarketData for market data.
+
 Live ticks (WebSocket) + historical candles via mStock's Trading API (Type
 A) — a sibling to data/market_data_adapter.py's AngelOne client, NOT a
 modification of it. Exposes the same method shapes
 (authenticate/fetch_historical_bars/fetch_last_n_bars/ws_connect/
-ws_subscribe/ws_start_streaming/ws_stop_streaming/ws_disconnect) so
-scripts/collect_ticks.py can run this alongside the AngelOne client, with
-mStock as the primary/first-connected source per the user's direction.
+ws_subscribe/ws_start_streaming/ws_stop_streaming/ws_disconnect).
 
 Own, separate MConnect session from broker/mstock_adapter.py's order-
 execution adapter — mirrors data/market_data_adapter.py's own AngelOne
