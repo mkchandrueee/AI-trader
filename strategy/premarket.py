@@ -231,11 +231,19 @@ class _FetchRefused(Exception):
 
 
 def _fetch_candle_df(adapter, symbol: str, start: datetime, end: datetime, timeframe: str, exchange: str):
-    """One source's raw attempt -- returns (df, refused: bool, reason). Never
-    raises; the caller decides how a refusal from ONE source (of possibly
-    two, see _fetch_option_candle) should affect the overall result."""
+    """One candle-fetch attempt -- returns (df, refused: bool, reason). Never raises.
+
+    `adapter` is accepted for call-site compatibility but unused: this goes through
+    data.live_bars.fetch_angel_bars(), the same process-wide adaptive-throttle AngelOne
+    fetch the Intraday Engine uses, instead of calling an adapter's fetch_historical_bars()
+    directly. Added 2026-09-22 -- Pre Market calling AngelOne independently of that throttle
+    was fine while mStock split the load; once market data went AngelOne-only the same day,
+    the two paths' uncoordinated calls tripped AngelOne's "exceeding access rate" limit
+    within minutes of the open, making live-confirmation fetches fail intermittently.
+    """
+    from data.live_bars import fetch_angel_bars
     try:
-        df = adapter.fetch_historical_bars(symbol, start, end, timeframe, exchange=exchange)
+        df = fetch_angel_bars(symbol, start, end, timeframe, exchange)
     except Exception as e:
         return None, True, str(e)
     if df.empty and df.attrs.get("error"):
@@ -300,7 +308,7 @@ def _fetch_option_candle(
 
 def _fetch_option_candle_with_fallback(
     adapter, opt_symbol: str, timeframe: str, mode: str, max_days: int = 7, exchange: str = "NFO",
-    today_only: bool = False,
+    today_only: bool = False, retry_on_refusal: bool = False,
 ) -> tuple[Optional[dict], Optional[date], bool]:
     """
     Try today's session first; if the market is closed today (weekend,
@@ -315,14 +323,30 @@ def _fetch_option_candle_with_fallback(
     limit that then corrupts everyone else's reads.
 
     A broker refusal aborts rather than walking back — see _FetchRefused.
+    `retry_on_refusal`: the live agent's automated loop must NOT set this
+    (it already retries every cycle, so an extra retry here just doubles
+    the API spend during exactly the rate-limit spike it's trying to avoid).
+    The Pre Market page's user-facing "Fetch" button is a rare, deliberate
+    click, not a tight poll loop, so it CAN afford one extra wait-and-retry
+    for a transient refusal -- confirmed live 2026-09-22: with AngelOne now
+    the sole market-data source (mStock removed the same day), several
+    OTHER unthrottled callers elsewhere in backend/app.py (scan_market's
+    own candle fetches, its auto-backfill) compete for the same rate limit,
+    so a short refusal here is often transient, not a real outage.
     """
     d = date.today()
+    refused = False
     for i in range(1 if today_only else max_days):
         if i > 0:
             time.sleep(0.35)  # AngelOne historical REST: ~3 req/sec, same spacing as market_data_adapter.py
         try:
             candle = _fetch_option_candle(adapter, opt_symbol, timeframe, mode, session_date=d, exchange=exchange)
         except _FetchRefused as e:
+            if retry_on_refusal and not refused:
+                refused = True
+                logger.warning(f"{opt_symbol}: broker refused ({e}) — retrying once after a short wait")
+                time.sleep(4.0)
+                continue  # retry the SAME day, don't walk back yet
             logger.warning(f"{opt_symbol}: broker refused ({e}) — not walking back, the day may well have data")
             return None, None, False
         if candle is not None:
@@ -332,13 +356,17 @@ def _fetch_option_candle_with_fallback(
 
 
 def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str = "latest",
-                      today_only: bool = False) -> dict:
+                      today_only: bool = False, retry_on_refusal: bool = False) -> dict:
     """
     Option Trade Decision Engine — Live. Runs analyse_option_pair on the
     requested ATM CE/PE candle, then checks whether its side agrees with
     (a) the day's NextDay Direction Analyser bias and (b) the fixed
     09:15-09:20 opening reading (skipped when this call itself IS the
     opening reading, or when the opening candle hasn't printed yet).
+
+    `retry_on_refusal`: see _fetch_option_candle_with_fallback's docstring.
+    strategy/intraday_agent.py's automated loop must NOT set this; only
+    backend/app.py's user-facing route does.
     """
     symbol = symbol.upper()
     if symbol not in _INDEX_CONFIG:
@@ -365,9 +393,11 @@ def live_confirmation(symbol: str = "NIFTY", timeframe: str = "5min", mode: str 
 
     exch = resolved["exchange"]
     ce_candle, ce_date, ce_live = _fetch_option_candle_with_fallback(
-        adapter, resolved["ce_symbol"], timeframe, mode, exchange=exch, today_only=today_only)
+        adapter, resolved["ce_symbol"], timeframe, mode, exchange=exch, today_only=today_only,
+        retry_on_refusal=retry_on_refusal)
     pe_candle, pe_date, pe_live = _fetch_option_candle_with_fallback(
-        adapter, resolved["pe_symbol"], timeframe, mode, exchange=exch, today_only=today_only)
+        adapter, resolved["pe_symbol"], timeframe, mode, exchange=exch, today_only=today_only,
+        retry_on_refusal=retry_on_refusal)
     if ce_candle is None or pe_candle is None:
         window = "09:15-09:20" if mode == "opening" else f"latest closed {timeframe}"
         scope = "today" if today_only else "the last 7 sessions"

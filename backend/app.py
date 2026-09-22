@@ -3882,6 +3882,10 @@ def api_premarket_live():
             symbol=request.args.get("symbol", "NIFTY").upper(),
             timeframe=request.args.get("timeframe", "5min"),
             mode=request.args.get("mode", "latest"),
+            # A user-facing button click, not the agent's tight poll loop -- can afford one
+            # extra wait-and-retry on a transient AngelOne refusal. See live_confirmation's
+            # own docstring on why the agent's automated call must NOT set this.
+            retry_on_refusal=True,
         )
         status = 200 if "error" not in result else 409
         return jsonify(result), status

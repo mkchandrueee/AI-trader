@@ -72,12 +72,12 @@ def _angel_throttle() -> None:
         _angel_last = time.time()
 
 
-def _angel_fetch(angel, inst: "Instrument", start: datetime, end: datetime, interval: str):
+def _angel_fetch_raw(angel, symbol: str, exchange: str, start: datetime, end: datetime, interval: str):
     """One AngelOne call with adaptive spacing: back off and retry once when it says 'exceeding access rate'."""
     global _angel_spacing
     for attempt in (1, 2):
         _angel_throttle()
-        df = angel.fetch_historical_bars(inst.angel, start, end, interval, exchange=inst.exchange)
+        df = angel.fetch_historical_bars(symbol, start, end, interval, exchange=exchange)
         err = df.attrs.get("error") if df is not None else None
         if err and "exceeding access rate" in str(err).lower():
             _angel_spacing = min(ANGEL_MAX_SPACING, _angel_spacing * 1.5)
@@ -88,6 +88,29 @@ def _angel_fetch(angel, inst: "Instrument", start: datetime, end: datetime, inte
             _angel_spacing = max(ANGEL_MIN_SPACING, _angel_spacing * 0.95)   # recover slowly after clean calls
         return df
     return df
+
+
+def fetch_angel_bars(symbol: str, start: datetime, end: datetime, interval: str = "5min", exchange: str = "NFO") -> pd.DataFrame:
+    """
+    Public entry point for a SINGLE AngelOne historical-candle fetch, through the process-wide adaptive
+    throttle above and the shared get_angel() session -- for ANY caller, not just fetch_bars() below.
+
+    Added 2026-09-22: strategy/premarket.py's live agent path used to call MarketDataAdapter.fetch_historical_bars()
+    directly, bypassing this throttle entirely. That was fine while mStock split the load, but once market
+    data went AngelOne-only (same day), Pre Market and the Intraday Engine both hitting AngelOne's REST
+    endpoint at their own uncoordinated paces tripped its "exceeding access rate" limit within minutes of
+    the open, making Pre Market's live-confirmation fetches fail intermittently. Centralizing every AngelOne
+    historical-candle call through this one function/throttle fixes that.
+
+    Returns the raw (uncleaned) DataFrame, with df.attrs["error"] set on failure -- same contract as
+    MarketDataAdapter.fetch_historical_bars() itself, so existing df.attrs.get("error") checks don't change.
+    """
+    angel = get_angel()
+    if not angel.authenticate():
+        df = pd.DataFrame()
+        df.attrs["error"] = "not authenticated"
+        return df
+    return _angel_fetch_raw(angel, symbol, exchange, start, end, interval)
 
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
@@ -112,15 +135,11 @@ def fetch_bars(inst: Instrument, start: datetime, end: datetime, interval: str =
     source is ever added back.
     """
     problems: list[str] = []
-    angel = get_angel()
     try:
-        if angel.authenticate():
-            df = _angel_fetch(angel, inst, start, end, interval)
-            if df is not None and not df.empty:
-                return _clean(df), "angelone", problems
-            problems.append(f"angelone: {df.attrs.get('error') if df is not None and df.attrs.get('error') else 'no candles'}")
-        else:
-            problems.append("angelone: not authenticated")
+        df = fetch_angel_bars(inst.angel, start, end, interval, inst.exchange)
+        if df is not None and not df.empty:
+            return _clean(df), "angelone", problems
+        problems.append(f"angelone: {df.attrs.get('error') if df is not None and df.attrs.get('error') else 'no candles'}")
     except Exception as e:
         problems.append(f"angelone: {e}")
     return None, None, problems

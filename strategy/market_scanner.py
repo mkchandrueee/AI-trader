@@ -128,9 +128,13 @@ def fetch_sensex_ohlc(scan_date: date) -> Optional[dict]:
     SENSEX's NextDay reading and ATM-strike spot — everything else in that
     module reads NSE bhavcopy, which has no SENSEX row at all.
     """
-    from data.market_data_adapter import MarketDataAdapter
-
-    adapter = MarketDataAdapter()
+    # Shared AngelOne session + adaptive throttle (data/live_bars.py), not a fresh MarketDataAdapter() per
+    # call -- see that module's docstring: a fresh instance used to force a re-login every call, and calling
+    # AngelOne outside this throttle competes with strategy/premarket.py and the Intraday Engine for the
+    # same rate limit (confirmed live 2026-09-22: this was the direct cause of SENSEX's Pre Market reading
+    # failing with "Could not resolve a current or previous-close price").
+    from data.live_bars import get_angel
+    adapter = get_angel()
     if not adapter.authenticate():
         logger.info("SENSEX skipped — AngelOne not connected (free NSE data doesn't need this, BSE has no free bhavcopy).")
         return None
@@ -138,7 +142,8 @@ def fetch_sensex_ohlc(scan_date: date) -> Optional[dict]:
     end = datetime.combine(scan_date, datetime.min.time()) + timedelta(days=1)
     start = end - timedelta(days=_SENSEX_FETCH_DAYS_BACK + 1)
     try:
-        df = adapter.fetch_historical_bars("SENSEX", start, end, "eod", exchange="BSE")
+        from data.live_bars import fetch_angel_bars
+        df = fetch_angel_bars("SENSEX", start, end, "eod", exchange="BSE")
     except Exception as e:
         logger.warning(f"SENSEX fetch failed: {e}")
         return None
