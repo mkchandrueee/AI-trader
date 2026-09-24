@@ -115,6 +115,81 @@ def _load_paper_trade_history():
                 logger.warning(f"Failed to load paper trade history ({mode}): {e}")
 
 
+_OPEN_POSITIONS_FILE = _PAPER_TRADES_DIR / "open_positions.json"
+
+
+def _snapshot_open_positions() -> int:
+    """
+    Write every OPEN position to disk so a restart does not destroy it.
+
+    Only CLOSED trades were ever persisted (_persist_closed_trade), so an open
+    position lived purely in memory -- confirmed the hard way on 2026-09-24, when
+    a restart mid-session would have silently erased a running PUT and left a hole
+    in exactly the evidence the promotion gate reads. Snapshotting is what makes
+    the restart button "clean" rather than merely warned-about.
+
+    Returns the number of positions written.
+    """
+    snapshot = {
+        "saved_at": datetime.now().isoformat(),
+        "session_date": date.today().isoformat(),
+        "modes": {mode: [p for p in positions if p.get("status") == "OPEN"]
+                  for mode, positions in paper_positions_by_mode.items()},
+    }
+    n = sum(len(v) for v in snapshot["modes"].values())
+    try:
+        _PAPER_TRADES_DIR.mkdir(exist_ok=True)
+        with open(_OPEN_POSITIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, default=str, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to snapshot open positions: {e}")
+        return 0
+    logger.info(f"Snapshotted {n} open position(s) for restart.")
+    return n
+
+
+def _restore_open_positions():
+    """
+    Reload positions saved by _snapshot_open_positions, but ONLY from today's
+    session. A snapshot from a previous day describes trades the market has long
+    since moved past; restoring those would resurrect stale positions that the
+    tick monitor would then manage as if they were live. Those are left on disk
+    and reported, not silently adopted or silently dropped.
+    """
+    if not _OPEN_POSITIONS_FILE.exists():
+        return
+    try:
+        with open(_OPEN_POSITIONS_FILE, "r", encoding="utf-8") as f:
+            snapshot = json.load(f)
+    except Exception as e:
+        logger.warning(f"Open-position snapshot unreadable, ignoring: {e}")
+        return
+
+    saved_date = snapshot.get("session_date")
+    total = sum(len(v) for v in snapshot.get("modes", {}).values())
+    if total == 0:
+        _OPEN_POSITIONS_FILE.unlink(missing_ok=True)
+        return
+    if saved_date != date.today().isoformat():
+        logger.warning(f"Open-position snapshot is from {saved_date}, not today — {total} position(s) "
+                       f"NOT restored. Left at {_OPEN_POSITIONS_FILE} for inspection.")
+        return
+
+    restored = 0
+    for mode, saved in snapshot.get("modes", {}).items():
+        if mode not in paper_positions_by_mode:
+            continue
+        live_ids = {p.get("id") for p in paper_positions_by_mode[mode]}
+        for pos in saved:
+            if pos.get("id") in live_ids:
+                continue                      # never double-restore the same trade
+            paper_positions_by_mode[mode].append(pos)
+            restored += 1
+    if restored:
+        logger.info(f"Restored {restored} open position(s) from the pre-restart snapshot.")
+    _OPEN_POSITIONS_FILE.unlink(missing_ok=True)
+
+
 def _persist_closed_trade(pos: dict):
     """Append a closed trade (with journey) to the JSONL file for its mode."""
     mode = pos.get("mode", "test")
@@ -435,6 +510,7 @@ def initialize():
 
     state["status"] = "ready"
     _load_paper_trade_history()
+    _restore_open_positions()
     logger.info("Dashboard initialized.")
 
     # ── Startup backfill: fill today's missing candles from 9:15 to now ──────
@@ -4241,6 +4317,143 @@ def api_agent_delivery_exit():
 # ── News Brief API (free RSS: ET, LiveMint, RBI, SEBI, Google News) ─────────
 
 
+def _wait_for_port_free(port: int, timeout: float = 30.0) -> bool:
+    """
+    Block until nothing is listening on `port`, or `timeout` elapses.
+
+    Used only by a restart-spawned process. Returns True if the port came free.
+    On timeout it returns False and lets the bind fail loudly rather than
+    pretending: a backend that cannot bind should say so, not run headless.
+    """
+    import socket
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex(("127.0.0.1", port)) != 0:
+                return True                  # nothing accepted the connection
+        time.sleep(0.4)
+    logger.warning(f"Port {port} still busy after {timeout:.0f}s; binding anyway and letting it fail loudly.")
+    return False
+
+
+@app.route("/api/system/restart/preflight")
+def api_system_restart_preflight():
+    """
+    GET /api/system/restart/preflight — what a restart would actually affect, so
+    the button is an informed action rather than a hopeful one. Read-only.
+
+    The honest list, learned from doing this by hand during a live session:
+      * open positions survive (they are snapshotted and restored), but only
+        because of _snapshot_open_positions -- worth SAYING, because for most of
+        this project's life they did not
+      * the tick collector is a separate process and keeps running; the new
+        backend adopts it as long as it is still writing fresh prices, so ticks
+        are not interrupted
+      * in-flight suggestions and staged approvals are in-memory and are lost
+      * during market hours the agent stops trading for the few seconds the
+        process is down
+    """
+    positions = [p for mode in paper_positions_by_mode.values() for p in mode if p.get("status") == "OPEN"]
+    try:
+        from strategy.intraday_agent import list_pending_approvals
+        approvals = len(list_pending_approvals())
+    except Exception:
+        approvals = 0
+    collector_fresh = _cache_prices_are_fresh()
+    return jsonify({
+        "market_hours": _is_market_hours(),
+        "open_positions": [
+            {"id": p.get("id"), "symbol": p.get("symbol"), "direction": p.get("direction"),
+             "entry_premium": p.get("entry_premium"), "current_premium": p.get("current_premium"),
+             "unrealised_pnl": p.get("unrealised_pnl"), "entry_time": p.get("entry_time")}
+            for p in positions
+        ],
+        "open_position_count": len(positions),
+        "pending_approvals": approvals,
+        "suggestions": len(state.get("trade_suggestions", [])),
+        "collector_delivering_fresh_prices": collector_fresh,
+        "effects": [
+            ("Open positions are saved to disk and restored on startup."
+             if positions else "No open positions."),
+            ("The tick collector is a separate process and keeps running; the new backend adopts it."
+             if collector_fresh else
+             "The tick collector is not delivering fresh prices; the new backend will start one if it is market hours."),
+            (f"{approvals} staged approval(s) and {len(state.get('trade_suggestions', []))} in-flight "
+             f"suggestion(s) are in memory and will be lost.")
+            if (approvals or state.get("trade_suggestions")) else
+            "No staged approvals or in-flight suggestions to lose.",
+            ("Market is OPEN — the agent stops trading for the few seconds the process is down."
+             if _is_market_hours() else "Market is closed — nothing is trading right now."),
+        ],
+    })
+
+
+@app.route("/api/system/restart", methods=["POST"])
+def api_system_restart():
+    """
+    POST /api/system/restart — replace this process with a fresh one, in place.
+
+    Body: {"confirm": true} is REQUIRED during market hours or when positions are
+    open. The confirmation is not ceremony: restarting mid-session stops the agent
+    for a few seconds and drops staged approvals, and the caller should have seen
+    the preflight before deciding that is fine.
+
+    NOT os.execv. That is the obvious implementation and it is wrong on Windows:
+    measured directly on 2026-09-24 with a probe server, os.execv did not replace
+    the process image -- it left the OLD process alive and listening while the new
+    one also bound the port, so netstat showed two PIDs on it and requests stopped
+    being answered reliably. That is precisely the duplicate-backend failure this
+    project has already been bitten by (see CLAUDE.md and _ensure_collector).
+
+    So: spawn a detached child, then exit this process hard. The child is told to
+    wait for the port to be released before it binds (RESTART_WAIT_FOR_PORT), which
+    removes the race in the other direction -- it cannot come up while this process
+    still holds :5050.
+    """
+    body = request.get_json(silent=True) or {}
+    positions = [p for mode in paper_positions_by_mode.values() for p in mode if p.get("status") == "OPEN"]
+    needs_confirm = _is_market_hours() or bool(positions)
+    if needs_confirm and not body.get("confirm"):
+        return jsonify({
+            "error": "Confirmation required.",
+            "reason": ("Market is open." if _is_market_hours() else "") +
+                      (f" {len(positions)} position(s) are open." if positions else ""),
+            "hint": "GET /api/system/restart/preflight first, then POST with {\"confirm\": true}.",
+        }), 409
+
+    saved = _snapshot_open_positions()
+
+    def _do_restart():
+        import logging as _logging
+        import subprocess
+        time.sleep(1.0)                     # let the HTTP response reach the client
+        logger.info("Restart requested from the dashboard — spawning the replacement process.")
+        env = dict(os.environ, RESTART_WAIT_FOR_PORT="1")
+        kwargs = {"cwd": str(Path(__file__).resolve().parent.parent), "env": env, "close_fds": True}
+        if os.name == "nt":
+            # Detached and in its own process group, so it does not die with this
+            # one and does not inherit its console's Ctrl-C.
+            kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        try:
+            child = subprocess.Popen([sys.executable] + sys.argv, **kwargs)
+            logger.info(f"Replacement backend spawned (PID={child.pid}); this process is exiting now.")
+        except Exception as e:
+            logger.error(f"Restart failed, nothing was spawned and this process stays up: {e}")
+            return
+        _logging.shutdown()
+        os._exit(0)                         # hard exit: release :5050 immediately, no atexit teardown races
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return jsonify({
+        "restarting": True,
+        "positions_saved": saved,
+        "message": f"Restarting. {saved} open position(s) saved and will be restored.",
+    })
+
+
 @app.route("/api/lab/pipeline")
 def api_lab_pipeline():
     """
@@ -4366,5 +4579,12 @@ if __name__ == "__main__":
     print(f"  Kill switch: POST http://localhost:{port}/api/broker/kill")
     print("  Press Ctrl+C to stop")
     print("=" * 50 + "\n")
+
+    # Spawned by /api/system/restart: the process being replaced still holds the
+    # port for a moment. Wait for it rather than racing it -- two backends on 5050
+    # is a failure mode this project has hit before, and it is worse than a slow
+    # start because the stale one keeps serving old code.
+    if os.environ.get("RESTART_WAIT_FOR_PORT") == "1":
+        _wait_for_port_free(port, timeout=30.0)
 
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
