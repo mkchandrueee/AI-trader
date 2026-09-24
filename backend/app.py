@@ -4241,6 +4241,37 @@ def api_agent_delivery_exit():
 # ── News Brief API (free RSS: ET, LiveMint, RBI, SEBI, Google News) ─────────
 
 
+@app.route("/api/lab/pipeline")
+def api_lab_pipeline():
+    """
+    GET /api/lab/pipeline — the Strategy Lab's five stages per strategy: spec,
+    params, recorded backtest, live paper evidence, registry state, plus the
+    promotion gate as a list of checks. Read-only: this route promotes nothing
+    and changes no state.
+    """
+    try:
+        from backend.lab import pipeline
+        return jsonify({"strategies": pipeline()})
+    except Exception as e:
+        logger.error(f"Lab pipeline failed: {e}", exc_info=True)
+        return jsonify({"error": str(e), "strategies": []}), 500
+
+
+@app.route("/api/lab/params")
+def api_lab_params():
+    """
+    GET /api/lab/params — every tunable in the trading logic with its live value,
+    declared bounds and category (tactical / locked / measured). Values are read
+    from the owning modules at request time, so this cannot go stale.
+    """
+    try:
+        from backend.lab import params_view
+        return jsonify(params_view())
+    except Exception as e:
+        logger.error(f"Lab params failed: {e}", exc_info=True)
+        return jsonify({"error": str(e), "groups": [], "counts": {}}), 500
+
+
 @app.route("/api/news/brief")
 def api_news_brief():
     """

@@ -155,6 +155,59 @@ def directional_check(recs: list[dict]) -> None:
           f" {100 * COST:.3f}% cost.\n")
 
 
+def _persist(recs, days, cut, train, test, summary, tr_m, te_m, corr, pct_train_pos, pct_test_pos, n_cfg) -> None:
+    """
+    Write this run to models/backtest_record.py so the Strategy Lab shows a stored
+    measurement instead of whatever was last printed to somebody's terminal.
+
+    The headline is the BEST out-of-sample net % per trade over all pattern/entry
+    pairs -- deliberately the most flattering single number available, so that a
+    negative headline is an unambiguous result rather than a matter of framing.
+    """
+    from models.backtest_record import record
+
+    scored = [(p, kind, te_net, n) for p, kind, _tr, te_net, n in summary if n >= 10]
+    best = max(scored, key=lambda r: r[2]) if scored else None
+    best_net = best[2] if best else None
+
+    if best_net is None:
+        verdict = "not enough out-of-sample trades in any pattern/entry pair to judge."
+    elif best_net > 0:
+        verdict = (f"best out-of-sample pair ({best[0]}/{best[1]}, n={best[3]}) nets {best_net:+.3f}% per trade "
+                   f"after {100 * COST:.3f}% costs. Positive, but it is the best of {len(scored)} pairs x {n_cfg} "
+                   f"configurations, so the gate still needs it to repeat on sessions chosen after this run.")
+    else:
+        verdict = (f"no pattern/entry pair is profitable out of sample; the best of {len(scored)} pairs "
+                   f"({best[0]}/{best[1]}, n={best[3]}) still nets {best_net:+.3f}% per trade after "
+                   f"{100 * COST:.3f}% costs.")
+
+    record(
+        "intraday_scanner",
+        script="scripts/intraday_research.py",
+        headline="best out-of-sample net % per trade (stop/target tuned on train only)",
+        headline_value=round(best_net, 4) if best_net is not None else None,
+        out_of_sample=True,
+        cost_pct=COST,
+        train_sessions=len({r["day"] for r in train}),
+        test_sessions=len({r["day"] for r in test}),
+        train_signals=len(train),
+        test_signals=len(test),
+        period=f"{days[0]} .. {days[-1]} (train through {cut})",
+        verdict=verdict,
+        detail={
+            "configurations_tried_per_pair": n_cfg,
+            "cells_evaluated": len(tr_m),
+            "pct_cells_profitable_train": pct_train_pos,
+            "pct_cells_profitable_test": pct_test_pos,
+            "train_test_net_correlation": corr,
+            "per_pair": [{"pattern": p, "entry": k, "train_net_pct": round(tr, 4),
+                          "test_net_pct": round(te, 4), "test_n": n}
+                         for p, k, tr, te, n in summary],
+        },
+    )
+    print("recorded to models/saved/backtest_records.json (visible in the Strategy Lab)")
+
+
 def main() -> None:
     recs = collect()
     if not recs:
@@ -220,11 +273,16 @@ def main() -> None:
                 b = evaluate([r for r in test if r["pattern"] == p], kind, cfg)
                 if a[0] >= MIN_TRAIN_TRADES and b[0] >= 10:
                     tr_m.append(a[1]); te_m.append(b[1])
+    corr = pct_train_pos = pct_test_pos = None
     if len(tr_m) > 10:
         corr = float(np.corrcoef(tr_m, te_m)[0, 1])
+        pct_train_pos = float(100 * np.mean(np.array(tr_m) > 0))
+        pct_test_pos = float(100 * np.mean(np.array(te_m) > 0))
         print(f"train->test correlation of net% across {len(tr_m)} pattern/entry/config cells: {corr:+.2f} "
               f"(near 0 = what looked good on train did not carry over)")
-        print(f"cells profitable on train: {100 * np.mean(np.array(tr_m) > 0):.0f}%   on test: {100 * np.mean(np.array(te_m) > 0):.0f}%\n")
+        print(f"cells profitable on train: {pct_train_pos:.0f}%   on test: {pct_test_pos:.0f}%\n")
+
+    _persist(recs, days, cut, train, test, summary, tr_m, te_m, corr, pct_train_pos, pct_test_pos, n_cfg)
 
     # ---- B1: do score and volume rank outcomes? ---------------------------------------------------------------------
     print("=== B1  do score / volume rank outcomes?  (chase entry, +-0.5% first touch, all sessions) ===")
