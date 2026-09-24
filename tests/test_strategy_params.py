@@ -69,8 +69,28 @@ def test_risk_controls_stay_locked():
 def test_costs_are_measured_not_tactical():
     """Costs come from the charge schedule and our own recorded spreads -- never tuned."""
     for p in sp.PARAMS:
-        if "cost" in p.key or "slippage" in p.key:
+        if "cost" in p.key or "slippage" in p.key or "spread" in p.key:
             assert p.category == sp.MEASURED, f"{p.key} is {p.category}, must be MEASURED"
+
+
+def test_every_measured_param_states_where_its_number_came_from():
+    """
+    A cost without a provenance is a preference with a decimal point. The ones that
+    genuinely cannot be measured must say ASSUMED rather than stay silent, which is
+    what stops an assumption being read as a measurement.
+    """
+    for p in sp.PARAMS:
+        if p.category == sp.MEASURED:
+            assert p.provenance, f"{p.key} is MEASURED but does not say where its number came from"
+
+
+def test_assumed_costs_are_flagged_as_assumed_in_the_snapshot():
+    snap = {r["key"]: r for r in sp.snapshot()}
+    # No equity quotes are collected, so these two cannot be measurements today.
+    for key in ("costs.equity_slippage_assumed", "intraday.slippage_pct"):
+        assert snap[key]["assumed"] is True, f"{key} should be flagged as an assumption"
+    # The option spread is measured from our own ticks, so it must NOT be flagged.
+    assert snap["costs.option_spread_round_trip"]["assumed"] is False
 
 
 def test_snapshot_is_json_serialisable():

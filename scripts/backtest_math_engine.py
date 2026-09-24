@@ -37,6 +37,7 @@ Usage:
     python scripts/backtest_math_engine.py --exit-field target
     python scripts/backtest_math_engine.py --min-rr 0             # disable the gate (pre-fix behaviour)
     python scripts/backtest_math_engine.py --compare              # all 4 combinations side by side
+    python scripts/backtest_math_engine.py --split                # train/test by date, records the result for the Strategy Lab
 """
 from __future__ import annotations
 
@@ -59,6 +60,7 @@ from backtest.option_resolver import (
     get_nearest_expiry, build_option_symbol, get_atm_strike,
     load_option_premiums_for_day,
 )
+from config import measured_costs
 from strategy.math_decision_strategy import analyse_option_pair, DEFAULT_CFG
 from strategy.intraday_agent import MIN_RR as LIVE_MIN_RR, EOD_SQUAREOFF as LIVE_EOD_SQUAREOFF
 from utils.logger import get_logger
@@ -67,11 +69,25 @@ logger = get_logger("backtest_math_engine")
 
 LOT_SIZE = 65
 COMMISSION = 40.0  # round-trip, matches scripts/tick_replay_backtest.py's COMMISSION
+
+# Crossing the bid-ask is a real cost and this harness used to ignore it entirely,
+# which flatters every result it has ever produced. config/measured_costs.py
+# measures it from our own recorded quotes rather than assuming a figure -- 0.237%
+# of premium round trip over 1.8M NIFTY option quotes, which on a typical entry is
+# close to the flat Rs.40 commission again. Measured once at import, not per trade:
+# it is a property of the market, not of the trade.
+SPREAD_ROUND_TRIP = measured_costs.option_round_trip_pct()
 STRIKE_GAP = 50
 SESSION_START = dtime(9, 15)
 OPENING_CLOSE = dtime(9, 20)      # end of the fixed opening 5-min candle
 LAST_ENTRY_BAR = dtime(15, 20)    # last 5-min bar boundary allowed to open a NEW position
 EOD_SQUAREOFF = LIVE_EOD_SQUAREOFF  # 15:25 -- imported, not hand-copied
+
+
+def _costs(entry_px: float, exit_px: float) -> float:
+    """Rupees of cost on a round trip: flat commission plus half the spread each way."""
+    half = SPREAD_ROUND_TRIP / 2
+    return COMMISSION + (entry_px * half + exit_px * half) * LOT_SIZE
 
 
 @dataclass
@@ -297,7 +313,7 @@ def replay_day(trading_date: date, exit_field: str, min_rr: float,
         open_trade.exit_time = exit_dt
         open_trade.exit_price = exit_px
         open_trade.exit_reason = reason
-        open_trade.pnl = round((exit_px - decision.entry) * LOT_SIZE - COMMISSION, 2)
+        open_trade.pnl = round((exit_px - decision.entry) * LOT_SIZE - _costs(decision.entry, exit_px), 2)
         trades.append(open_trade)
         blocked_until = exit_dt
 
@@ -350,12 +366,106 @@ def summarize(label: str, trades: list[BTTrade]) -> dict:
     # trade as a full stop-out (worst case) so the reader can see whether the conclusion survives
     # the missing half. If the two profit factors disagree in SIGN of the verdict, don't trust either.
     unobs = [t for t in trades if t.exit_reason in UNOBSERVABLE_REASONS]
-    worst_loss = sum(abs((t.stop - t.entry) * LOT_SIZE) + COMMISSION for t in unobs)
+    worst_loss = sum(abs((t.stop - t.entry) * LOT_SIZE) + _costs(t.entry, t.stop) for t in unobs)
     pf_worst = gross_win / (gross_loss + worst_loss) if (gross_loss + worst_loss) else float("inf")
     if unobs:
         print(f"  sensitivity: PF={pf:.2f} observed-only  ->  PF={pf_worst:.2f} if all {len(unobs)} unobservable trades were stop-outs")
     return {"label": label, "n": len(valid), "win_rate": win_rate, "total_pnl": total_pnl, "pf": pf, "pf_worst": pf_worst,
             "unobservable": unobservable}
+
+
+TRAIN_FRACTION = 0.6
+
+
+def _expectancy_pct(trades: list[BTTrade]) -> tuple[int, float]:
+    """(n, mean P&L per trade as a fraction of the premium deployed). Dimensionless,
+    so it is comparable across days on differently-priced options -- and comparable
+    with models/evidence_bundle.py's expectancy_pct on the live paper record."""
+    valid = [t for t in trades if t.exit_reason not in UNOBSERVABLE_REASONS and t.pnl is not None]
+    if not valid:
+        return 0, 0.0
+    rets = [t.pnl / (t.entry * LOT_SIZE) for t in valid if t.entry]
+    return len(rets), (sum(rets) / len(rets) if rets else 0.0)
+
+
+def run_split(dates: list[date]) -> None:
+    """
+    Choose the configuration on the earlier sessions, report it on the later ones,
+    and store the result via models/backtest_record.py.
+
+    The live agent's config is not a free parameter -- exit=partial with the
+    MIN_RR gate on is what actually runs -- so this does not search for the
+    best-looking cell and call it an edge. It reports the LIVE configuration out
+    of sample, and shows the alternatives beside it only so the reader can see
+    whether the live choice was a lucky pick or a defensible one.
+    """
+    from models.backtest_record import record
+
+    cut = dates[int(len(dates) * TRAIN_FRACTION) - 1]
+    train = [d for d in dates if d <= cut]
+    test = [d for d in dates if d > cut]
+    if not train or not test:
+        print(f"Not enough days to split ({len(dates)} available); need at least 2.")
+        return
+
+    print(f"\nTRAIN {len(train)} sessions ({train[0]} .. {cut})   TEST {len(test)} sessions ({test[0]} .. {test[-1]})")
+    print(f"costs applied: Rs.{COMMISSION:.0f} flat + {100 * SPREAD_ROUND_TRIP:.3f}% measured spread, round trip\n")
+
+    configs = [("partial", LIVE_MIN_RR), ("partial", 0.0), ("target", LIVE_MIN_RR), ("target", 0.0)]
+    rows = []
+    for exit_field, gate in configs:
+        tr_n, tr_e = _expectancy_pct(run_backtest(train, exit_field, gate))
+        te_n, te_e = _expectancy_pct(run_backtest(test, exit_field, gate))
+        live = exit_field == "partial" and gate == LIVE_MIN_RR
+        rows.append({"exit_field": exit_field, "min_rr": gate, "is_live_config": live,
+                     "train_n": tr_n, "train_expectancy_pct": round(100 * tr_e, 4),
+                     "test_n": te_n, "test_expectancy_pct": round(100 * te_e, 4)})
+
+    print(f"{'config':26} {'train n':>8} {'train %':>9} {'test n':>8} {'test %':>9}")
+    for r in rows:
+        tag = f"exit={r['exit_field']} rr>={r['min_rr']:g}" + ("  <- LIVE" if r["is_live_config"] else "")
+        print(f"{tag:26} {r['train_n']:>8} {r['train_expectancy_pct']:>9.3f} {r['test_n']:>8} {r['test_expectancy_pct']:>9.3f}")
+
+    live_row = next(r for r in rows if r["is_live_config"])
+    v = live_row["test_expectancy_pct"]
+    best = max(rows, key=lambda r: r["test_expectancy_pct"])
+
+    if live_row["test_n"] < 10:
+        verdict = (f"only {live_row['test_n']} out-of-sample trades under the live configuration -- too few to "
+                   f"conclude anything either way.")
+    elif v > 0:
+        verdict = (f"the live configuration (exit=partial, MIN_RR>={LIVE_MIN_RR:g}) returns {v:+.3f}% of premium "
+                   f"per trade out of sample over {live_row['test_n']} trades, after Rs.{COMMISSION:.0f} flat and "
+                   f"the measured {100 * SPREAD_ROUND_TRIP:.3f}% spread.")
+    else:
+        verdict = (f"the live configuration (exit=partial, MIN_RR>={LIVE_MIN_RR:g}) loses {v:.3f}% of premium per "
+                   f"trade out of sample over {live_row['test_n']} trades, after Rs.{COMMISSION:.0f} flat and the "
+                   f"measured {100 * SPREAD_ROUND_TRIP:.3f}% spread. Best of the four configurations tried "
+                   f"(exit={best['exit_field']}, rr>={best['min_rr']:g}) still returns "
+                   f"{best['test_expectancy_pct']:+.3f}%.")
+
+    record(
+        "math_decision_engine",
+        script="scripts/backtest_math_engine.py --split",
+        headline="out-of-sample expectancy per trade, live configuration (% of premium)",
+        headline_value=v,
+        out_of_sample=True,
+        cost_pct=SPREAD_ROUND_TRIP,
+        train_sessions=len(train), test_sessions=len(test),
+        train_signals=live_row["train_n"], test_signals=live_row["test_n"],
+        period=f"{dates[0]} .. {dates[-1]} (train through {cut})",
+        verdict=verdict,
+        detail={
+            "flat_commission_rupees": COMMISSION,
+            "spread_source": "config/measured_costs.py, measured from our own recorded NIFTY option quotes",
+            "configurations_tried_per_pair": len(configs),
+            "per_pair": [{"pattern": f"exit={r['exit_field']}", "entry": f"rr>={r['min_rr']:g}",
+                          "train_net_pct": r["train_expectancy_pct"],
+                          "test_net_pct": r["test_expectancy_pct"], "test_n": r["test_n"]}
+                         for r in rows],
+        },
+    )
+    print("\nrecorded to models/saved/backtest_records.json (visible in the Strategy Lab)")
 
 
 def main():
@@ -367,6 +477,9 @@ def main():
                          help=f"Minimum decision.rr to take a trade (default: {LIVE_MIN_RR}, the live MIN_RR). 0 disables the gate.")
     parser.add_argument("--compare", action="store_true",
                          help="Run all 4 combinations of exit-field x min-rr-gate side by side, ignoring --exit-field/--min-rr.")
+    parser.add_argument("--split", action="store_true",
+                         help="Train/test split by date: report the LIVE configuration on held-out sessions "
+                              "and store the result via models/backtest_record.py (shows in the Strategy Lab).")
     parser.add_argument("--sweep", action="store_true",
                          help="Sweep the MIN_RR gate (on the R:R of the exit actually used) for exit=partial: 0, 0.5, 0.75, 1.0, 1.5, 2.0.")
     args = parser.parse_args()
@@ -376,6 +489,10 @@ def main():
         print("No historical days with NIFTY option candle data found.")
         return
     print(f"Replaying {len(dates)} day(s): {dates[0]} -> {dates[-1]}")
+
+    if args.split:
+        run_split(dates)
+        return
 
     if args.sweep:
         results = []

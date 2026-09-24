@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import { API_BASE } from "@/lib/api";
-import { RefreshCw, Microscope, Check, X, Minus, Lock, Ruler, SlidersHorizontal } from "lucide-react";
+import { RefreshCw, Microscope, Check, X, Minus, Lock, Ruler, SlidersHorizontal, AlertTriangle } from "lucide-react";
 
 const GREEN = "#00e87b";
 const RED = "#ff3e3e";
@@ -18,6 +18,7 @@ interface ParamRow {
   key: string; group: string; category: "tactical" | "locked" | "measured";
   unit: string; desc: string; module: string; attr: string;
   value: number | string | null; lo: number | null; hi: number | null; violation: string | null;
+  provenance: string | null; assumed: boolean;
 }
 
 interface BacktestRow {
@@ -44,6 +45,7 @@ interface GateCheck { label: string; status: "pass" | "fail" | "pending"; detail
 interface Strategy {
   id: string; title: string; trades: boolean; instrument: string; what: string; not: string;
   params: ParamRow[];
+  costs?: ParamRow[];   // absent when the backend predates the cost panel
   backtest: BacktestRow | null;
   backtest_history: BacktestRow[];
   evidence: Evidence;
@@ -387,6 +389,41 @@ export default function LabPage() {
                 </div>
               </div>
 
+              {/* ── costs this strategy's numbers are net of ─────────────────── */}
+              {(s.costs?.length ?? 0) > 0 && (
+                <div className="t-panel p-4 mt-5">
+                  <h3 className="text-[11px] font-semibold uppercase tracking-wider mb-1" style={{ color: MUTED }}>
+                    Costs these numbers are net of
+                  </h3>
+                  <p className="text-[9px] mb-3" style={{ color: DIM }}>
+                    A result is only as trustworthy as the cost it is net of. Anything marked ASSUMED has not been
+                    measured against real data.
+                  </p>
+                  <div className="grid gap-[2px]">
+                    {s.costs!.map(c => (
+                      <div key={c.key} className="p-2" style={{ background: INK, borderLeft: `2px solid ${c.assumed ? AMBER : "#4aa3ff"}` }}>
+                        <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                          <span className="text-[10px] font-semibold flex items-center gap-1.5" style={{ color: TEXT }}>
+                            {c.assumed
+                              ? <AlertTriangle className="w-3 h-3" style={{ color: AMBER }} />
+                              : <Ruler className="w-3 h-3" style={{ color: "#4aa3ff" }} />}
+                            {c.key}
+                          </span>
+                          <span className="text-[12px] font-bold" style={{ color: c.assumed ? AMBER : "#4aa3ff" }}>
+                            {typeof c.value === "number" ? `${(c.value * 100).toFixed(3)}%` : String(c.value)}
+                            <span className="text-[9px] font-normal ml-1" style={{ color: DIM }}>round trip</span>
+                          </span>
+                        </div>
+                        <div className="text-[10px] leading-snug mt-[2px]" style={{ color: MUTED }}>{c.desc}</div>
+                        {c.provenance && (
+                          <div className="text-[9px] mt-1" style={{ color: c.assumed ? AMBER : DIM }}>{c.provenance}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* ── 2 PARAMS ─────────────────────────────────────────────────── */}
               <div className="t-panel p-4 mt-5">
                 <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
@@ -429,6 +466,9 @@ export default function LabPage() {
                             <span className="text-[9px] shrink-0" style={{ color: DIM }}>bounds {p.lo} … {p.hi}</span>
                           )}
                         </div>
+                        {p.provenance && (
+                          <div className="text-[9px] mt-1" style={{ color: p.assumed ? AMBER : DIM }}>{p.provenance}</div>
+                        )}
                         {p.violation && (
                           <div className="text-[9px] mt-1" style={{ color: RED }}>OUT OF BOUNDS: {p.violation}</div>
                         )}

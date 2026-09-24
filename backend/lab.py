@@ -55,6 +55,7 @@ _SPECS = [
         "not": "predict direction from any model -- the ML macro/micro models are not in this path, "
                "and it never holds overnight.",
         "param_prefixes": ("engine.", "agent."),
+        "cost_keys": ("costs.option_spread_round_trip",),
         "registry_key_fn": _agent_key,
         "backtest_key": "math_decision_engine",
         "evidence_key_fn": _agent_key,
@@ -68,6 +69,7 @@ _SPECS = [
                 "and 30-minute hammers as-of each bar, and replays what happened next.",
         "not": "place orders or feed any live decision. Its output is a scorecard, not a signal.",
         "param_prefixes": ("intraday.",),
+        "cost_keys": ("intraday.cost_pct", "intraday.slippage_pct"),
         "registry_key_fn": lambda: "intraday_scanner",
         "backtest_key": "intraday_scanner",
         "evidence_key_fn": lambda: "intraday_scanner",
@@ -82,6 +84,7 @@ _SPECS = [
         "not": "place orders. Bhavcopy is unadjusted, so symbols with a split or bonus in the window "
                "are skipped rather than read as breakouts.",
         "param_prefixes": ("positional.",),
+        "cost_keys": ("costs.equity_slippage_assumed",),
         "registry_key_fn": lambda: "positional_scanner",
         "backtest_key": "positional_scanner",
         "evidence_key_fn": lambda: "positional_scanner",
@@ -91,6 +94,14 @@ _SPECS = [
 
 def _params_for(prefixes: tuple[str, ...]) -> list[dict]:
     return [r for r in sp.snapshot() if r["key"].startswith(prefixes)]
+
+
+def _costs_for(keys: tuple[str, ...]) -> list[dict]:
+    """The cost parameters this strategy's P&L is net of. Shown separately from its
+    own tunables because a reader needs to know whether a result is after a measured
+    cost or after an assumed one before the result means anything."""
+    wanted = set(keys)
+    return [r for r in sp.snapshot() if r["key"] in wanted]
 
 
 def _evidence_for(key: str) -> dict:
@@ -202,6 +213,7 @@ def pipeline() -> list[dict]:
             "what": spec["what"],
             "not": spec["not"],
             "params": _params_for(spec["param_prefixes"]),
+            "costs": _costs_for(spec.get("cost_keys", ())),
             "backtest": bt,
             "backtest_history": backtest_record.history(spec["backtest_key"]),
             "evidence": ev,

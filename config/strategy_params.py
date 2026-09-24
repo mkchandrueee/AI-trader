@@ -32,9 +32,11 @@ CATEGORIES -- the important part, and where this deliberately differs from the
   measured  Values that must come from MEASUREMENT, not choice -- costs and
             slippage. Picking these optimistically is the single easiest way to
             invent an edge on paper. The intraday cost assumption was 3x too low
-            until it was corrected against real charges, and the option spread is
-            now measurable from our own recorded bid/ask ticks (median 0.241% round
-            trip on the ATM strikes the agent trades).
+            until it was corrected against real charges, and the option spread
+            (config/measured_costs.py) is measured from our own recorded bid/ask
+            quotes rather than assumed. Each carries a `provenance` string saying
+            where the number came from; the ones that genuinely cannot be measured
+            say ASSUMED there rather than passing themselves off as measurements.
 """
 from __future__ import annotations
 
@@ -60,13 +62,16 @@ class Param:
     hi: Optional[float] = None
     group: str = ""               # UI grouping
     container: Optional[str] = None  # module-level dict holding the value, e.g. "DEFAULT_CFG"
+    call: bool = False            # `attr` is a zero-arg function to call, not a constant
+    provenance: Optional[str] = None  # for MEASURED params: where the number came from
 
     def current(self) -> Any:
         """Live value, read from the owning module. Never cached -- that is the point."""
         mod = importlib.import_module(self.module)
         if self.container:
             return getattr(mod, self.container)[self.attr]
-        return getattr(mod, self.attr)
+        v = getattr(mod, self.attr)
+        return v() if self.call else v
 
     def violation(self) -> Optional[str]:
         """Why the live value is unreadable or outside its declared bounds, else None."""
@@ -92,6 +97,7 @@ _IA = "strategy.intraday_agent"
 _IS = "strategy.intraday_scanner"
 _PS = "strategy.positional_scanner"
 _MD = "strategy.math_decision_strategy"
+_MC = "config.measured_costs"
 
 PARAMS: list[Param] = [
     # ── Option engine: the live paper agent's own entry/exit geometry ────────────
@@ -132,13 +138,32 @@ PARAMS: list[Param] = [
     Param("agent.eod_squareoff", _IA, "EOD_SQUAREOFF", LOCKED, "time",
           "Everything still open is squared off here rather than carried overnight.", None, None, "Agent risk"),
 
-    # ── Intraday Engine: costs (MEASURED, not chosen) ───────────────────────────
+    # ── Costs (MEASURED, not chosen) ────────────────────────────────────────────
+    # `provenance` is the whole point of this category: a cost that says where it
+    # came from can be argued with, and one that cannot is just a preference with
+    # a decimal point. Two of these four are honest assumptions, and say so.
+    Param("costs.option_spread_round_trip", _MC, "option_round_trip_pct", MEASURED, "fraction of premium",
+          "Round-trip bid-ask cost on the NIFTY options the live agent trades. The single largest "
+          "correction available to this platform's backtests, which modelled it as zero.",
+          0.0005, 0.02, "Costs", call=True,
+          provenance="Median of our own recorded bid/ask quotes, premium >= 20, last 30 days."),
+    Param("costs.futures_spread_round_trip", _MC, "futures_round_trip_pct", MEASURED, "fraction of price",
+          "Round-trip bid-ask cost on NIFTY futures.", 0.00005, 0.005, "Costs", call=True,
+          provenance="Median of our own recorded NIFTY-I bid/ask quotes, last 30 days."),
+    Param("costs.equity_slippage_assumed", _MC, "ASSUMED_EQUITY_ROUND_TRIP", MEASURED, "fraction, round trip",
+          "Slippage assumed for the equity engines. This one is NOT measured and cannot be: we "
+          "subscribe to no equity instruments, so tick_data holds no equity quotes.",
+          0.0002, 0.005, "Costs",
+          provenance="ASSUMED. No equity quote data exists to measure it against."),
     Param("intraday.cost_pct", _IS, "COST_PCT", MEASURED, "fraction, round trip",
-          "Brokerage + STT + exchange/GST/stamp for NSE intraday equity. Measured from the real "
-          "charge schedule, not picked to make a backtest look good.", 0.0005, 0.005, "Costs"),
+          "Brokerage + STT + exchange/GST/stamp for NSE intraday equity. From the real charge "
+          "schedule, not picked to make a backtest look good.", 0.0005, 0.005, "Costs",
+          provenance="Derived from the published NSE/broker charge schedule."),
     Param("intraday.slippage_pct", _IS, "SLIPPAGE_PCT", MEASURED, "fraction, round trip",
-          "Assumed slippage on a breakout entry. Replaceable with the measured half-spread from our "
-          "own recorded bid/ask ticks.", 0.0002, 0.005, "Costs"),
+          "Slippage assumed on an equity breakout entry. Mirrors costs.equity_slippage_assumed and "
+          "is subject to the same limitation: no equity quotes exist to measure it.",
+          0.0002, 0.005, "Costs",
+          provenance="ASSUMED. No equity quote data exists to measure it against."),
 
     # ── Intraday Engine: replay/evaluation settings ─────────────────────────────
     Param("intraday.forward_bars", _IS, "FORWARD_BARS", LOCKED, "5-min bars",
@@ -245,7 +270,8 @@ def snapshot() -> list[dict]:
         out.append({
             "key": p.key, "group": p.group, "category": p.category, "unit": p.unit, "desc": p.desc,
             "module": p.module, "attr": p.attr, "value": _jsonable(value),
-            "lo": p.lo, "hi": p.hi, "violation": err,
+            "lo": p.lo, "hi": p.hi, "violation": err, "provenance": p.provenance,
+            "assumed": bool(p.provenance and p.provenance.startswith("ASSUMED")),
         })
     return out
 
