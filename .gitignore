@@ -37,3 +37,12 @@ node_modules/
 dashboard/.next/
 data/eod_cache/
 data/intraday_cache/
+
+# Broker SDK logs, written into the repo root at runtime by tradingapi_a
+# (mStock). Tracebacks from failed logins land here, so they are kept out of
+# version control rather than risk a session detail being committed by accident.
+mconnect.log
+mticker.log
+
+# Local backups of the paper-trade journal
+*.jsonl.bak
