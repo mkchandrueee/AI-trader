@@ -4382,7 +4382,8 @@ def _wait_for_port_free(port: int, timeout: float = 30.0) -> bool:
             if probe.connect_ex(("127.0.0.1", port)) != 0:
                 return True                  # nothing accepted the connection
         time.sleep(0.4)
-    logger.warning(f"Port {port} still busy after {timeout:.0f}s; binding anyway and letting it fail loudly.")
+    logger.error(f"Port {port} is STILL held after {timeout:.0f}s — something other than the process being "
+                 f"replaced owns it (another backend, or a second copy started by hand).")
     return False
 
 
@@ -4666,7 +4667,18 @@ if __name__ == "__main__":
     # port for a moment. Wait for it rather than racing it -- two backends on 5050
     # is a failure mode this project has hit before, and it is worse than a slow
     # start because the stale one keeps serving old code.
+    #
+    # If the port is STILL held after the wait, refuse to start. An earlier version
+    # logged a warning and bound anyway "to fail loudly", which was wrong: Windows
+    # sockets bind with SO_REUSEADDR, so the second bind SUCCEEDS silently and you
+    # end up with two listeners on 5050 and connections distributed between them.
+    # Measured exactly that at 21:22 on 2026-09-24. There is no loud failure to
+    # rely on here, so not starting is the only safe outcome.
     if os.environ.get("RESTART_WAIT_FOR_PORT") == "1":
-        _wait_for_port_free(port, timeout=30.0)
+        if not _wait_for_port_free(port, timeout=30.0):
+            logger.error(f"Refusing to start a second backend on port {port}. The process that requested "
+                         f"this restart has already exited, so stop whatever else is holding the port and "
+                         f"start the backend again.")
+            sys.exit(1)
 
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
