@@ -4317,6 +4317,12 @@ def api_agent_delivery_exit():
 # ── News Brief API (free RSS: ET, LiveMint, RBI, SEBI, Google News) ─────────
 
 
+# How long to watch a freshly spawned replacement before trusting it enough to
+# hand the port over. Long enough to catch an immediate startup crash (bad stdio,
+# import error, syntax error), short enough not to stall the restart.
+CHILD_HEALTH_WAIT_SECS = 4.0
+
+
 def _wait_for_port_free(port: int, timeout: float = 30.0) -> bool:
     """
     Block until nothing is listening on `port`, or `timeout` elapses.
@@ -4428,23 +4434,56 @@ def api_system_restart():
         import logging as _logging
         import subprocess
         time.sleep(1.0)                     # let the HTTP response reach the client
-        logger.info("Restart requested from the dashboard — spawning the replacement process.")
+        project_root = Path(__file__).resolve().parent.parent
+
+        # The child MUST be given real stdout/stderr handles. DETACHED_PROCESS gives
+        # it no console, so whatever the parent's stdout was is not valid for it --
+        # and this backend prints a startup banner before any logging is configured,
+        # so an invalid stdout kills it instantly and silently, with nothing in the
+        # log to say why. Measured exactly that on 2026-09-24 21:00: the parent
+        # exited, PID 9488 was spawned, and it died without writing a single line.
+        # A file handle is valid regardless of how the parent was started (console,
+        # nohup, service), which a first probe missed because it happened to be
+        # launched with its own stdout already redirected to a file.
+        log_dir = project_root / "logs"
+        log_dir.mkdir(exist_ok=True)
+        restart_log = log_dir / f"backend_{datetime.now():%Y%m%d}.log"
+
         env = dict(os.environ, RESTART_WAIT_FOR_PORT="1")
-        kwargs = {"cwd": str(Path(__file__).resolve().parent.parent), "env": env, "close_fds": True}
+        kwargs = {"cwd": str(project_root), "env": env, "close_fds": True}
         if os.name == "nt":
-            # Detached and in its own process group, so it does not die with this
-            # one and does not inherit its console's Ctrl-C.
+            # Detached and in its own process group, so it survives this console
+            # closing and does not inherit its Ctrl-C.
             kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
+
         try:
-            child = subprocess.Popen([sys.executable] + sys.argv, **kwargs)
-            logger.info(f"Replacement backend spawned (PID={child.pid}); this process is exiting now.")
+            out = open(restart_log, "a", buffering=1, encoding="utf-8", errors="replace")
+            child = subprocess.Popen([sys.executable] + sys.argv,
+                                     stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                     **kwargs)
         except Exception as e:
             logger.error(f"Restart failed, nothing was spawned and this process stays up: {e}")
             return
+
+        # Do NOT hand over until the replacement is actually alive. Taking down a
+        # working backend for one that crashed on startup leaves nothing serving
+        # :5050, which is exactly what happened the first time this shipped.
+        # The child is expected to be alive-but-waiting here: it blocks on
+        # _wait_for_port_free until this process lets go of the port.
+        deadline = time.time() + CHILD_HEALTH_WAIT_SECS
+        while time.time() < deadline:
+            time.sleep(0.5)
+            if child.poll() is not None:
+                logger.error(f"Replacement backend (PID={child.pid}) exited with code {child.returncode} "
+                             f"during startup — NOT restarting. This process stays up and keeps serving. "
+                             f"Its output is in {restart_log}.")
+                return
+        logger.info(f"Replacement backend alive (PID={child.pid}, waiting for the port); "
+                    f"this process is exiting now. Its log: {restart_log}")
         _logging.shutdown()
-        os._exit(0)                         # hard exit: release :5050 immediately, no atexit teardown races
+        os._exit(0)                         # hard exit: release the port now, no atexit teardown races
 
     threading.Thread(target=_do_restart, daemon=True).start()
     return jsonify({
