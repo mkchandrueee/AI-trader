@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -92,6 +93,19 @@ def _fetch_with_fallback(fetch_fn, start_date: date, max_days: int = 7) -> tuple
     return None, None
 
 
+# SENSEX's previous-session OHLC costs a rate-limited AngelOne call (BSE publishes
+# no free bhavcopy), and _current_spot() falls through to it on EVERY call because
+# no SENSEX tick stream is subscribed -- so the agent spent two of them per index
+# cycle on a figure that barely moves. A TTL just under the agent's 60-second
+# ENTRY_INTERVAL_SECS collapses each cycle's pair into one call while keeping the
+# value fresh cycle to cycle. Deliberately NOT cached for the whole session:
+# during market hours this can return today's still-forming daily candle, and a
+# stale spot picks the wrong ATM strike.
+_PREV_SESSION_TTL_SECS = 55
+_prev_session_cache: dict[str, tuple[float, tuple]] = {}
+_prev_session_lock = threading.Lock()
+
+
 def _previous_session_ohlc(symbol: str = "NIFTY") -> tuple[Optional[dict], Optional[date]]:
     """
     High/Low/Close of the last COMPLETED session — what the NextDay
@@ -112,13 +126,27 @@ def _previous_session_ohlc(symbol: str = "NIFTY") -> tuple[Optional[dict], Optio
     from data.jugaad_adapter import fetch_index_bhavcopy
     from strategy.market_scanner import INDEX_TRADING_SYMBOL, _find_col, _safe_float, fetch_sensex_ohlc
 
+    key = symbol.upper()
+    with _prev_session_lock:
+        hit = _prev_session_cache.get(key)
+    if hit is not None and time.time() - hit[0] < _PREV_SESSION_TTL_SECS:
+        return hit[1]
+
+    def _remember(result: tuple) -> tuple:
+        # Only a real reading is cached; a None means "ask again next time",
+        # not "there is no price for the rest of the day".
+        if result[0] is not None:
+            with _prev_session_lock:
+                _prev_session_cache[key] = (time.time(), result)
+        return result
+
     # SENSEX is a BSE index — it appears nowhere in NSE's index bhavcopy, so
     # it takes the AngelOne path the scanner already uses for it.
-    if symbol.upper() == "SENSEX":
+    if key == "SENSEX":
         ohlc = fetch_sensex_ohlc(date.today())
         if ohlc is None:
             return None, None
-        return {"high": ohlc["high"], "low": ohlc["low"], "close": ohlc["close"]}, ohlc["date"]
+        return _remember(({"high": ohlc["high"], "low": ohlc["low"], "close": ohlc["close"]}, ohlc["date"]))
 
     index_name = next((k for k, v in INDEX_TRADING_SYMBOL.items() if v == symbol.upper()), None)
     if index_name is None:
@@ -143,7 +171,7 @@ def _previous_session_ohlc(symbol: str = "NIFTY") -> tuple[Optional[dict], Optio
             return None
         return {"high": h, "low": l, "close": c}
 
-    return _fetch_with_fallback(_fetch_one, date.today())
+    return _remember(_fetch_with_fallback(_fetch_one, date.today()))
 
 
 def nextday_reading(symbol: str = "NIFTY") -> dict:
@@ -251,6 +279,33 @@ def _fetch_candle_df(adapter, symbol: str, start: datetime, end: datetime, timef
     return df, False, None
 
 
+# Once 09:20 has passed, today's 09:15-09:20 candle can never change again -- but
+# strategy/intraday_agent.py re-requests it for every index on every 60-second
+# cycle, and the Pre Market page asks for it too. Measured live on 2026-09-24:
+# AngelOne was refusing 51% of this process's historical calls with "exceeding
+# access rate", and the agent was losing real decisions to it ("No 09:15-09:20
+# candle available for ..."). Six of roughly fourteen calls per cycle were
+# re-fetching this one immutable candle.
+#
+# Keyed by session date so it cannot serve yesterday's candle after midnight, and
+# only populated once the window has closed -- a candle still forming is never
+# cached. Bounded by construction: at most (indices x 2 legs) entries per day.
+_opening_candle_cache: dict[tuple, dict] = {}
+_opening_candle_lock = threading.Lock()
+
+
+def _opening_window_closed(now: datetime) -> bool:
+    return now.time() >= datetime.strptime(OPENING_WINDOW[1], "%H:%M").time()
+
+
+def clear_opening_candle_cache() -> int:
+    """Drop the cache (a new session, or a manual refresh). Returns entries removed."""
+    with _opening_candle_lock:
+        n = len(_opening_candle_cache)
+        _opening_candle_cache.clear()
+    return n
+
+
 def _fetch_option_candle(
     adapter, opt_symbol: str, timeframe: str, mode: str, session_date: Optional[date] = None,
     exchange: str = "NFO",
@@ -272,6 +327,16 @@ def _fetch_option_candle(
     now = datetime.now()
     session_date = session_date or now.date()
     is_today = session_date == now.date()
+
+    # A closed opening candle is immutable, so serve it from the session cache
+    # rather than spending a rate-limited broker call on it every cycle.
+    cache_key = (opt_symbol, session_date, exchange)
+    cacheable = mode == "opening" and (not is_today or _opening_window_closed(now))
+    if cacheable:
+        with _opening_candle_lock:
+            hit = _opening_candle_cache.get(cache_key)
+        if hit is not None:
+            return dict(hit)
 
     if mode == "opening":
         start = datetime.combine(session_date, datetime.strptime(OPENING_WINDOW[0], "%H:%M").time())
@@ -299,11 +364,15 @@ def _fetch_option_candle(
                 return None  # only the still-forming candle exists so far
         row = df.iloc[-1]
 
-    return {
+    candle = {
         "timestamp": row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else str(row["timestamp"]),
         "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]), "close": float(row["close"]),
         "source": source,
     }
+    if cacheable:
+        with _opening_candle_lock:
+            _opening_candle_cache[cache_key] = dict(candle)
+    return candle
 
 
 def _fetch_option_candle_with_fallback(
