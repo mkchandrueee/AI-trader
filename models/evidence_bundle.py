@@ -149,10 +149,24 @@ def build_evidence_bundle(trades: list[dict], basis: str = "paper") -> dict:
         peak = max(peak, cum)
         max_dd = min(max_dd, cum - peak)
 
+    # Which cost model booked these trades. Everything closed before 2026-09-24
+    # was booked on a flat Rs.40 commission with NO spread at all; after that the
+    # measured bid-ask (config/measured_costs.py) is charged too. Averaging the
+    # two produces a profit factor that describes neither sample, so the mix is
+    # reported rather than hidden -- the reader can then decide whether the
+    # number is comparable, and a mixed sample is a reason to wait for a clean
+    # one, not to squint at this one.
+    models: dict[str, int] = {}
+    for t in trades:
+        models[t.get("cost_model") or "flat40_no_spread"] = \
+            models.get(t.get("cost_model") or "flat40_no_spread", 0) + 1
+
     return {
         "basis": basis,
         "n": n,
         "sufficient_sample": n >= MIN_SAMPLE_FOR_ESTIMATE,
+        "cost_models": models,
+        "cost_model_mixed": len(models) > 1,
         "win_rate": round(win_rate, 4),
         "win_rate_ci95": (ci_lo, ci_hi),
         "expectancy_pct": round(expectancy, 4) if expectancy is not None else None,

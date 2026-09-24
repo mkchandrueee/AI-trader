@@ -165,16 +165,28 @@ def _gate(spec: dict, bt: Optional[dict], ev: dict, state: str) -> list[dict]:
                                  if spec["trades"] else "This strategy places no orders, so it has no paper record."})
 
     pf = ev.get("profit_factor")
+    mix = ev.get("cost_models") or {}
+    mixed_note = ""
+    if ev.get("cost_model_mixed"):
+        parts = ", ".join(f"{count} on {model}" for model, count in sorted(mix.items()))
+        mixed_note = (f" NOTE: this sample spans more than one cost model ({parts}), so the figure "
+                      f"describes neither cleanly — trades booked before the measured spread was "
+                      f"charged are flattered.")
     if n < reg.MIN_SAMPLE_FOR_HEALTH_CHECK or pf is None:
         checks.append({"label": f"Paper profit factor at or above {reg.MIN_PROFIT_FACTOR}", "status": "pending",
-                       "detail": "Not enough trades to compute a meaningful profit factor."})
+                       "detail": "Not enough trades to compute a meaningful profit factor." + mixed_note})
     elif pf >= reg.MIN_PROFIT_FACTOR:
-        checks.append({"label": f"Paper profit factor at or above {reg.MIN_PROFIT_FACTOR}", "status": "pass",
-                       "detail": f"profit factor {pf:.2f} over {n} trades."})
+        # A pass on a mixed sample is not a pass: the trades booked without the
+        # spread are the ones making it look good.
+        checks.append({"label": f"Paper profit factor at or above {reg.MIN_PROFIT_FACTOR}",
+                       "status": "pending" if ev.get("cost_model_mixed") else "pass",
+                       "detail": f"profit factor {pf:.2f} over {n} trades." + mixed_note})
     else:
+        # A fail stays a fail on a mixed sample: the untagged trades were booked
+        # WITHOUT the spread, so the true figure is worse than this, not better.
         checks.append({"label": f"Paper profit factor at or above {reg.MIN_PROFIT_FACTOR}", "status": "fail",
                        "detail": f"profit factor {pf:.2f} over {n} trades -- below 1.0 means gross losses exceed "
-                                 f"gross gains. This is also the automatic suspension trigger."})
+                                 f"gross gains. This is also the automatic suspension trigger." + mixed_note})
 
     # 5. not currently suspended
     if state == reg.SUSPENDED:

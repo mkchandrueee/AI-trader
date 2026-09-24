@@ -45,6 +45,7 @@ from strategy.regime_detector import (
 )
 from models.predict import Predictor
 from models.strategy_models import StrategyPredictor
+from config import measured_costs
 from backtest.option_resolver import get_nearest_expiry, get_days_to_expiry
 from config.settings import (
     WEIGHT_ML_PROBABILITY, WEIGHT_OPTIONS_FLOW, WEIGHT_TECHNICAL_STRENGTH,
@@ -192,6 +193,15 @@ def _restore_open_positions():
 
 def _persist_closed_trade(pos: dict):
     """Append a closed trade (with journey) to the JSONL file for its mode."""
+    # Stamp WHICH cost model booked this trade. Trades closed before 2026-09-24
+    # carry no tag and were booked on the flat commission alone, with no spread;
+    # without this, an evidence bundle would average the two together and report a
+    # profit factor that describes neither. models/evidence_bundle.py reads it.
+    pos.setdefault("cost_model", COST_MODEL_ID)
+    entry, exit_ = pos.get("entry_premium"), pos.get("exit_premium")
+    if entry is not None and exit_ is not None and pos.get("costs_rupees") is None:
+        pos["costs_rupees"] = round(_trade_costs(entry, exit_, pos.get("lot_size") or 65), 2)
+
     mode = pos.get("mode", "test")
     _closed_trades_by_mode.setdefault(mode, []).append(pos)
     fpath = _paper_trades_file(mode)
@@ -312,6 +322,37 @@ TRAIL_ACTIVATE_PCT = 0.10   # Start trailing once profit > 10%
 TRAIL_FACTOR = 0.50         # Trail SL at 50% of max profit
 TGT_PCT = 0.50              # Target at 50% above entry
 COMMISSION = 40.0
+
+# Crossing the bid-ask is a real cost and the live paper book ignored it entirely,
+# booking only the flat commission above. That is not a rounding error on NIFTY
+# options: config/measured_costs.py puts the round trip at 0.237% of premium,
+# measured from 1.8M of our OWN recorded bid/ask quotes, which on a typical entry
+# is worth about as much again as the Rs.40 commission. Applied to the 75 closed
+# trades on 2026-09-24 it moved profit factor 0.56 -> 0.52 and expectancy
+# -0.82% -> -1.06% per trade: it did not change the verdict, but every number the
+# promotion gate reads was flattered by roughly Rs.32 a trade.
+#
+# Read once at import, not per trade -- it is a property of the market, not of
+# the trade -- and tagged onto every closed trade (see COST_MODEL_ID) so a sample
+# booked under the old model is never silently averaged in with one booked under
+# this one.
+SPREAD_ROUND_TRIP = measured_costs.option_round_trip_pct()
+COST_MODEL_ID = "flat40+measured_spread"
+
+
+def _trade_costs(entry_premium: float, exit_premium: float, lot_size: int) -> float:
+    """
+    Rupees of cost on a round trip: the flat commission, plus half the measured
+    spread crossed on the way in and half on the way out.
+
+    Used for unrealised P&L too. If you closed the position now you would pay
+    both legs, so marking it any other way overstates what the position is
+    actually worth.
+    """
+    half = SPREAD_ROUND_TRIP / 2
+    return COMMISSION + (entry_premium * half + exit_premium * half) * lot_size
+
+
 LIVE_CACHE_FILE = "/tmp/td_live_prices.json"
 
 # Background processes
@@ -1946,7 +1987,8 @@ def _update_position_price(pos: dict, live_prem: float):
 
     ep = pos["entry_premium"]
     pos["current_premium"] = round(live_prem, 2)
-    pos["unrealised_pnl"] = round((live_prem - ep) * pos["lot_size"] - COMMISSION, 2)
+    pos["unrealised_pnl"] = round((live_prem - ep) * pos["lot_size"]
+                                  - _trade_costs(ep, live_prem, pos["lot_size"]), 2)
 
     # --- Trailing SL logic ---
     # Ensure fields exist (backwards compat with old positions)
@@ -2042,7 +2084,7 @@ def _update_position_price(pos: dict, live_prem: float):
 
     # --- Auto-exit checks ---
     if live_prem <= pos["sl"]:
-        pnl = round((live_prem - ep) * pos["lot_size"] - COMMISSION, 2)
+        pnl = round((live_prem - ep) * pos["lot_size"] - _trade_costs(ep, live_prem, pos["lot_size"]), 2)
         pos.update({
             "status": "CLOSED",
             "exit_time": datetime.now().strftime("%H:%M:%S"),
@@ -2054,7 +2096,7 @@ def _update_position_price(pos: dict, live_prem: float):
         logger.info(f"PAPER AUTO-EXIT {pos['exit_reason']}: {pos['symbol']} @ ₹{live_prem} | SL was ₹{pos['sl']} | PnL=₹{pnl}")
         _persist_closed_trade(pos)
     elif live_prem >= pos["target"]:
-        pnl = round((live_prem - ep) * pos["lot_size"] - COMMISSION, 2)
+        pnl = round((live_prem - ep) * pos["lot_size"] - _trade_costs(ep, live_prem, pos["lot_size"]), 2)
         pos.update({
             "status": "CLOSED",
             "exit_time": datetime.now().strftime("%H:%M:%S"),
@@ -2560,7 +2602,8 @@ def api_paper_exit():
         return jsonify({"error": "Position not found or already closed"}), 404
 
     exit_premium = pos["current_premium"]
-    pnl = round((exit_premium - pos["entry_premium"]) * pos["lot_size"] - COMMISSION, 2)
+    pnl = round((exit_premium - pos["entry_premium"]) * pos["lot_size"]
+                - _trade_costs(pos["entry_premium"], exit_premium, pos["lot_size"]), 2)
     pos.update({
         "status": "CLOSED",
         "exit_time": datetime.now().strftime("%H:%M:%S"),
