@@ -396,9 +396,18 @@ def run_cycle() -> dict:
             # so it admitted trades whose real R:R was ~0.5 (live book: payoff
             # 0.55, breakeven win rate 64.6%, actual 50.7%). Gate on `rr_partial`
             # = partial_pts/risk, the R:R of the trade actually taken.
-            rr_taken = decision.get("rr_partial", decision.get("rr"))
-            if rr_taken is not None and rr_taken == rr_taken and rr_taken < MIN_RR:
-                _log(symbol, "SKIP", f"{mode}: rr_partial={rr_taken:.2f} below MIN_RR={MIN_RR}")
+            # Every pre-trade limit, in one verdict (risk/pretrade.py). The R:R
+            # rule described above is check 3 inside it; the rest -- trades per
+            # day, premium cap, loss per trade, daily loss, concurrent positions,
+            # duplicates, entry window -- were DECLARED in config/risk_profiles.py
+            # and enforced nowhere on this path until 2026-11-03. The verdict
+            # carries every failing reason, not just the first, because "blocked
+            # for three reasons" and "missed by a hair" should not look the same
+            # in the log.
+            verdict = _risk_verdict(symbol, mode, decision)
+            if not verdict.allowed:
+                _log(symbol, "SKIP", f"{mode}: {verdict.reason()}",
+                     {"risk_checks": verdict.to_dict()})
                 continue
 
             with _lock:
@@ -427,6 +436,52 @@ def run_cycle() -> dict:
 # here instead of opening a position directly; a human approves or rejects
 # it via the routes in backend/app.py. See models/approval.py for the
 # full lifecycle (TTL, re-validation, price-tolerance voiding).
+
+def _risk_verdict(symbol: str, mode: str, decision: dict):
+    """
+    Run risk/pretrade.py against a staged decision.
+
+    Sourced entirely from existing config -- the active risk profile and
+    config/settings.py -- so this introduces no new thresholds, only enforcement
+    of the ones already written down. On any internal error it BLOCKS rather than
+    allowing: a risk gate that fails open is not a risk gate.
+    """
+    from config.risk_profiles import RiskLevel, get_risk_profile
+    from config.settings import INITIAL_CAPITAL, MAX_CONCURRENT_POSITIONS, MAX_DAILY_LOSS
+    from risk import pretrade
+
+    try:
+        profile = get_risk_profile(RiskLevel(os.getenv("RISK_LEVEL", "medium").lower()))
+    except (ValueError, KeyError):
+        profile = get_risk_profile(RiskLevel.MEDIUM)
+
+    try:
+        limits = pretrade.Limits.from_config(
+            profile, min_rr=MIN_RR, capital=INITIAL_CAPITAL,
+            max_concurrent=MAX_CONCURRENT_POSITIONS, max_daily_loss=MAX_DAILY_LOSS)
+        positions = (_paper_book or {}).get("test", []) if _paper_book else []
+        book = pretrade.Book.from_paper_book(positions)
+        side = decision.get("side")
+        order = {
+            "symbol": symbol,
+            "option_symbol": decision.get("ce_symbol") if side == "call" else decision.get("pe_symbol"),
+            "entry": decision.get("entry"),
+            "stop": decision.get("stop"),
+            "partial": decision.get("partial"),
+            "lot_size": decision.get("lot_size"),
+        }
+        return pretrade.evaluate(
+            order=order, book=book, limits=limits, now=datetime.now(),
+            strategy_blocked=_strategy_suspended(),
+            autofire_blocked=_live_autofire_blocked(),
+        )
+    except Exception as e:                       # fail SAFE, never open
+        logger.error(f"Pre-trade gate errored for {symbol} ({mode}); blocking: {e}", exc_info=True)
+        return pretrade.Verdict(
+            allowed=False,
+            checks=[pretrade.Check("gate_error", pretrade.BLOCK,
+                                   f"risk gate failed to run ({type(e).__name__}: {e}); blocking")])
+
 
 def _strategy_key() -> str:
     return f"{MODEL_NAME} ({AGENT_NAME})"

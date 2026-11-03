@@ -86,7 +86,14 @@ class OrderManager:
 
     def __init__(self, adapter: Optional[BrokerAdapter] = None):
         self._mode = os.getenv("TRADE_MODE", "paper").lower()
-        self._max_daily_loss = float(os.getenv("MAX_DAILY_LOSS", "-5000"))
+        # Via settings, NOT os.getenv directly: $MAX_DAILY_LOSS has been written as
+        # a fraction (0.05) on at least one machine, and read raw it gave this
+        # manager a ceiling of Rs.0.05 -- which its own `daily_pnl <= limit` check
+        # trips on the very first order, halting trading with "breached (Rs.0)".
+        # config.settings._daily_loss_rupees() resolves the units and says what it
+        # decided. See its docstring.
+        from config.settings import MAX_DAILY_LOSS as _MAX_DAILY_LOSS_RUPEES
+        self._max_daily_loss = _MAX_DAILY_LOSS_RUPEES
         self._max_concurrent = int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))
         self._confirmation_mode = os.getenv("ORDER_CONFIRMATION", "auto").lower()
 

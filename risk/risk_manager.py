@@ -22,7 +22,7 @@ from typing import Dict, Optional
 
 from config.settings import (
     INITIAL_CAPITAL,
-    MAX_DAILY_LOSS,
+    MAX_DAILY_LOSS_PCT,
     MAX_TRADES_PER_DAY,
     RISK_PER_TRADE,
 )
@@ -58,7 +58,7 @@ class RiskManager:
         capital: float = INITIAL_CAPITAL,
         risk_per_trade: float = RISK_PER_TRADE,
         max_trades_per_day: int = MAX_TRADES_PER_DAY,
-        max_daily_loss: float = MAX_DAILY_LOSS,
+        max_daily_loss: float = MAX_DAILY_LOSS_PCT,   # FRACTION of capital, not rupees
     ):
         self.capital = capital
         self.risk_per_trade = risk_per_trade

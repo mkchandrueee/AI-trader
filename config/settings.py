@@ -112,7 +112,16 @@ MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "50"))
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "50000"))
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.01"))
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "5"))
-MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "0.05"))
+
+# Daily loss ceiling as a FRACTION of capital -- risk/risk_manager.py's own rule
+# ("max daily loss = 5%", see its docstring). Deliberately a different name, and a
+# different env var, from the RUPEE ceiling further down this file: both were
+# called MAX_DAILY_LOSS and both read $MAX_DAILY_LOSS, so the rupee definition
+# shadowed this one and risk_manager computed `capital * -5000`, making its
+# daily-loss rule fire on every single check. Found 2026-11-03; that module is
+# not imported anywhere, so nothing live was affected, but the trap is removed
+# rather than left for whoever wires it up.
+MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.05"))
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.6"))
 
 # ── Model Paths ───────────────────────────────────────────────────────────────
@@ -169,7 +178,43 @@ STRAT_PROB_SCALE = 0.06             # normalize strat_prob raw output to [0,1] w
 # ── Broker Execution ─────────────────────────────────────────────────────────
 TRADE_MODE = os.getenv("TRADE_MODE", "paper")              # "paper" or "angelone"
 ORDER_CONFIRMATION = os.getenv("ORDER_CONFIRMATION", "auto")  # "auto" or "manual"
-MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "-5000"))
+def _daily_loss_rupees() -> float:
+    """
+    Daily loss ceiling in RUPEES, always negative.
+
+    $MAX_DAILY_LOSS has been ambiguous: this file used to define it twice, once as
+    a fraction (0.05) and once in rupees (-5000), and the .env on this machine held
+    0.05 -- plainly meaning "5%". broker/order_manager.py reads it as rupees, so it
+    was running with a ceiling of Rs.0.05 and its own startup banner said so
+    ("max_loss=Rs.0.05"). Its check is `daily_pnl <= max_daily_loss`, and
+    daily_pnl starts at 0.0, so 0.0 <= 0.05 is true on the FIRST order: it would
+    reject that order and halt trading permanently with "Max daily loss breached
+    (Rs.0)". Nothing noticed because the paper agent does not route through
+    OrderManager -- but live mStock execution is meant to.
+
+    Rather than silently honour a value that cannot mean what it says, the units
+    are resolved explicitly and the interpretation is logged, so a misconfigured
+    ceiling is visible instead of being either obeyed or ignored.
+    """
+    raw = float(os.getenv("MAX_DAILY_LOSS", "-5000"))
+    if raw <= -1:
+        return raw                                   # already rupees, negative
+    if 0 < abs(raw) < 1:                             # 0.05 -> 5% of capital
+        resolved = -abs(raw) * INITIAL_CAPITAL
+        print(f"[settings] MAX_DAILY_LOSS={raw} looks like a FRACTION, not rupees. "
+              f"Reading it as {abs(raw) * 100:.1f}% of Rs.{INITIAL_CAPITAL:,.0f} = Rs.{resolved:,.0f}. "
+              f"Set MAX_DAILY_LOSS to a negative rupee amount (e.g. -2500) to be unambiguous.")
+        return resolved
+    resolved = -abs(raw)                             # positive rupees -> negative
+    if raw != resolved:
+        print(f"[settings] MAX_DAILY_LOSS={raw} is positive; a loss ceiling must be negative. "
+              f"Using Rs.{resolved:,.0f}.")
+    return resolved
+
+
+# Daily loss ceiling in RUPEES (negative), used by broker/order_manager.py and
+# risk/pretrade.py. The fraction-of-capital version is MAX_DAILY_LOSS_PCT above.
+MAX_DAILY_LOSS = _daily_loss_rupees()
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
