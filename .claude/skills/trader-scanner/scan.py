@@ -29,10 +29,17 @@ def run(pattern: str | None, state: str | None, min_score: int) -> dict:
 
     frames = load_all()
     if not frames:
-        return {"error": "No cached 5-minute bars. Run scripts/export_intraday_bars.py, or let the "
-                         "backend sync during market hours."}
+        return {"error": "No cached 5-minute bars. Trigger a sync (POST /api/intraday/sync on a running "
+                         "backend), or run scripts/export_intraday_bars.py."}
 
-    result = isc.scan(frames, datetime.now())
+    # data/intraday_bars_store sanitises symbols into filenames, so the index comes
+    # back as NIFTY_I, not NIFTY-I. scan() uses index_symbol to decide which series
+    # may NOT set the freshness reference -- NIFTY futures print to 15:40 while
+    # stocks stop at 15:25, so if the index is not recognised every stock is marked
+    # stale and the universe collapses to one. Resolve the key as stored.
+    index_symbol = next((k for k in frames if k.upper().replace("-", "_") == "NIFTY_I"), "NIFTY-I")
+
+    result = isc.scan(frames, datetime.now(), index_symbol=index_symbol)
     rows = []
     for p, found in result["setups"].items():
         if pattern and p != pattern:
@@ -76,7 +83,20 @@ def main() -> None:
     print(f"setups  {counts}")
 
     if not rows:
-        print("\nNothing matched.")
+        # "Nothing matched" at the close looks like a broken scanner. It is not:
+        # the detectors refuse to open a fresh setup on a bar closing after
+        # LAST_SIGNAL_TIME, so a cache whose newest bar is late in the session
+        # correctly yields nothing. Say which case this is.
+        from strategy.intraday_scanner import LAST_SIGNAL_TIME
+        import pandas as pd
+        asof = pd.Timestamp(r["asof_bar"]) if r["asof_bar"] else None
+        if asof is not None and asof.time() > LAST_SIGNAL_TIME:
+            print(f"\nNothing matched - the newest cached bar is {asof:%H:%M}, past the "
+                  f"{LAST_SIGNAL_TIME:%H:%M} cut-off for opening a fresh setup. This is the "
+                  f"detectors declining by design, not an empty board. Scan again on "
+                  f"intraday bars, or sync during market hours.")
+        else:
+            print("\nNothing matched.")
         sys.exit(1)
     print(f"\n{'symbol':14} {'pattern':8} {'state':10} {'score':>5} {'entry':>9} {'stop':>9} {'target':>9}")
     for d in rows:
