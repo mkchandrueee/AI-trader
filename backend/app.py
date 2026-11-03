@@ -56,7 +56,13 @@ from utils.logger import get_logger
 logger = get_logger("dashboard")
 
 app = Flask(__name__)
-CORS(app)  # Allow Next.js dev server on :3000
+CORS(app)
+
+# Toolkit API: the 11 trader skills, served to the dashboard. Each route calls the
+# SAME module the matching skill in .claude/skills calls, so the Toolkit page and
+# the /trader-* skills can never disagree. Nothing in it places an order.
+from backend.skills_api import toolkit as _toolkit_bp  # noqa: E402
+app.register_blueprint(_toolkit_bp)  # Allow Next.js dev server on :3000
 
 # ── Global State ──────────────────────────────────────────────────────────────
 scanner_enabled = True      # Start/stop toggle for the background scanner

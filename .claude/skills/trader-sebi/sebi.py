@@ -34,48 +34,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-SEBI_RSS = "https://www.sebi.gov.in/sebirss.xml"
+from data.sebi_feed import KINDS, SEBI_RSS, fetch_actions, filter_actions  # noqa: E402
 
-KINDS = {
-    "adjudication": ("adjudication order",),
-    "settlement": ("settlement order", "settlement application"),
-    "recovery": ("recovery certificate",),
-    "exemption": ("exemption order",),
-    "manipulation": ("manipulation", "front running", "front-running", "insider trading"),
-}
-
-# "in the matter of X Limited" / "in the scrip of Y Ltd" -- SEBI's own phrasing.
-_ENTITY = re.compile(
-    r"in the (?:matter|scrip) of\s+(.+?)(?:\s*[.,]|\s+\(|$)", re.IGNORECASE)
-
-
-def fetch(timeout: int = 20) -> list[dict]:
-    req = urllib.request.Request(SEBI_RSS, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        root = ET.fromstring(r.read())
-    items = []
-    for it in root.iter("item"):
-        title = (it.findtext("title") or "").strip()
-        if not title:
-            continue
-        low = title.lower()
-        kinds = [k for k, words in KINDS.items() if any(w in low for w in words)]
-        m = _ENTITY.search(title)
-        # SEBI's feed sometimes emits an absolute URL already prefixed with its
-        # own base, giving "https://www.sebi.gov.in/https://www.sebi.gov.in/...".
-        # Keep the last absolute URL in the string so the link is usable.
-        link = (it.findtext("link") or "").strip()
-        if link.count("http") > 1:
-            link = "http" + link.rsplit("http", 1)[1]
-
-        items.append({
-            "title": title,
-            "link": link,
-            "published": (it.findtext("pubDate") or "").strip(),
-            "kinds": kinds,
-            "entity": m.group(1).strip() if m else None,
-        })
-    return items
+# The feed parsing lives in data/sebi_feed.py so this skill and the Toolkit page
+# classify and extract entities identically.
+fetch = fetch_actions
 
 
 def main() -> None:

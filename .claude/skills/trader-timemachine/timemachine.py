@@ -23,63 +23,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-MAX_BARS = 24          # about two hours of 5-minute bars, the agent's own hold cap
+from backtest.plan_replay import MAX_BARS, replay_plan  # noqa: E402
 
-
-def replay(symbol: str, entry: float, stop: float, exit_px: float, sessions: int) -> dict:
-    import pandas as pd
-    from config import measured_costs
-    from data.intraday_bars_store import load_bars
-
-    df = load_bars(symbol)
-    if df is None or df.empty:
-        return {"error": f"No cached bars for {symbol}. Run scripts/export_intraday_bars.py."}
-
-    df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df["day"] = df["timestamp"].dt.date
-    days = sorted(df["day"].unique())[-sessions:]
-    long = exit_px > entry
-    cost_frac = measured_costs.ASSUMED_EQUITY_ROUND_TRIP
-
-    outcomes = []
-    for d in days:
-        bars = df[df["day"] == d].reset_index(drop=True)
-        # Enter on the first bar whose range covers the entry level.
-        start = next((i for i in range(len(bars))
-                      if bars.low[i] <= entry <= bars.high[i]), None)
-        if start is None:
-            outcomes.append({"day": str(d), "result": "no fill"})
-            continue
-        result, px = "open at cap", float(bars.close.iloc[min(start + MAX_BARS, len(bars) - 1)])
-        for i in range(start, min(start + MAX_BARS, len(bars))):
-            hi, lo = float(bars.high[i]), float(bars.low[i])
-            hit_stop = lo <= stop if long else hi >= stop
-            hit_exit = hi >= exit_px if long else lo <= exit_px
-            if hit_stop:                      # same-bar tie -> stop wins
-                result, px = "stop", stop
-                break
-            if hit_exit:
-                result, px = "exit", exit_px
-                break
-        gross = (px - entry) / entry * (1 if long else -1)
-        outcomes.append({"day": str(d), "result": result, "fill": round(px, 2),
-                         "net_pct": round(100 * (gross - cost_frac), 3)})
-
-    traded = [o for o in outcomes if o["result"] != "no fill"]
-    nets = [o["net_pct"] for o in traded]
-    return {
-        "symbol": symbol, "entry": entry, "stop": stop, "exit": exit_px,
-        "direction": "long" if long else "short",
-        "sessions_examined": len(days), "filled": len(traded),
-        "cost_pct_applied": round(100 * cost_frac, 3),
-        "cost_source": "ASSUMED for equities -- no equity quotes are collected, so this is not measured",
-        "wins": sum(1 for o in traded if o["result"] == "exit"),
-        "stops": sum(1 for o in traded if o["result"] == "stop"),
-        "timeouts": sum(1 for o in traded if o["result"] == "open at cap"),
-        "mean_net_pct": round(sum(nets) / len(nets), 3) if nets else None,
-        "outcomes": outcomes,
-    }
+# The replay lives in backtest/plan_replay.py so this skill and the Toolkit page
+# share one implementation of the same-bar tie rule and the cost handling.
+replay = replay_plan
 
 
 def main() -> None:

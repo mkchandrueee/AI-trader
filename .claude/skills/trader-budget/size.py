@@ -26,65 +26,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-# Exchange lot sizes. Not guessed -- these are the contract specifications, and
-# they change by exchange circular, so they live in one place with a date.
-LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 35, "FINNIFTY": 65, "SENSEX": 20}
-LOT_SIZES_AS_OF = "2026-11-03"
+from risk.sizing import LOT_SIZES, LOT_SIZES_AS_OF, size_position  # noqa: E402
 
-
-def size(entry: float, stop: float, symbol: str, max_loss: float | None = None,
-         capital: float | None = None) -> dict:
-    from config.risk_profiles import RiskLevel, get_risk_profile
-    from config.settings import INITIAL_CAPITAL
-
-    symbol = symbol.upper()
-    lot_units = LOT_SIZES.get(symbol)
-    profile = get_risk_profile(RiskLevel.MEDIUM)
-    capital = capital if capital is not None else INITIAL_CAPITAL
-    budget = max_loss if max_loss is not None else profile.max_capital_per_trade * capital
-
-    risk_per_unit = entry - stop
-    out = {
-        "symbol": symbol, "entry": entry, "stop": stop,
-        "lot_units": lot_units, "capital": capital, "max_loss_budget": round(budget, 2),
-        "risk_per_unit": round(risk_per_unit, 2),
-    }
-
-    if lot_units is None:
-        out["error"] = (f"No lot size on file for {symbol}. Known: {', '.join(sorted(LOT_SIZES))} "
-                        f"(as of {LOT_SIZES_AS_OF}).")
-        return out
-    if risk_per_unit <= 0:
-        out["error"] = f"stop {stop} is not below entry {entry}; this is a long option buy."
-        return out
-
-    risk_per_lot = risk_per_unit * lot_units
-    lots = int(budget // risk_per_lot)                 # floor: never round a position up
-    out.update({
-        "risk_per_lot": round(risk_per_lot, 2),
-        "lots": lots,
-        "units": lots * lot_units,
-        "risk_taken": round(lots * risk_per_lot, 2),
-        "premium_outlay": round(lots * lot_units * entry, 2),
-    })
-
-    if lots == 0:
-        # The whole point of this tool. Say WHY, and what would change it.
-        max_stop = budget / lot_units
-        need_capital = (risk_per_lot / profile.max_capital_per_trade) if max_loss is None else None
-        out["verdict"] = "NO TRADE"
-        out["why"] = (f"One lot risks Rs.{risk_per_lot:,.0f}, above the Rs.{budget:,.0f} budget. "
-                      f"Lots are indivisible, so there is no smaller position.")
-        out["what_would_change_it"] = [
-            f"A stop within Rs.{max_stop:.2f} a unit (entry {entry} -> stop {entry - max_stop:.2f}).",
-        ] + ([f"Capital of about Rs.{need_capital:,.0f} at this profile's "
-              f"{profile.max_capital_per_trade:.1%} per-trade budget."] if need_capital else []) + [
-            f"A per-trade budget of at least Rs.{risk_per_lot:,.0f}.",
-        ]
-    else:
-        out["verdict"] = f"{lots} lot(s)"
-        out["headroom"] = round(budget - lots * risk_per_lot, 2)
-    return out
+# The sizing logic lives in risk/sizing.py so this skill and the Toolkit page
+# (backend/skills_api.py) can never disagree about a position size.
+size = size_position
 
 
 def main() -> None:

@@ -141,9 +141,26 @@ interface AgentStatus {
   session_date: string | null;
   open_positions: AgentPosition[];
   closed_today: AgentPosition[];
-  log: { time: string; symbol: string; action: string; detail: string }[];
+  log: AgentLogEntry[];
   last_cycle: string | null;
   symbols: string[];
+}
+
+interface RiskCheck {
+  name: string;
+  status: "pass" | "block" | "warn" | "n/a";
+  detail: string;
+}
+
+interface AgentLogEntry {
+  time: string;
+  symbol: string;
+  action: string;
+  detail: string;
+  // Present on entries the pre-trade gate (risk/pretrade.py) decided. The agent
+  // logs the whole verdict, not just the summary line, so a refusal can be read
+  // check by check instead of guessing which limit bit.
+  risk_checks?: { allowed: boolean; blocks: string[]; warnings: string[]; checks: RiskCheck[] };
 }
 
 interface PendingApproval {
@@ -558,18 +575,57 @@ export default function PreMarketPage() {
               {agent.log.length > 0 && (
                 <details>
                   <summary className="text-[10px] cursor-pointer" style={{ color: "#5a6270" }}>
-                    Decision log ({agent.log.length}) — every check, fired or skipped
+                    Decision log ({agent.log.length}) — every check, fired or skipped. Gated entries expand into all {"\u00A0"}risk checks.
                   </summary>
                   <div className="mt-2 max-h-40 overflow-y-auto">
-                    {agent.log.map((l, i) => (
-                      <div key={i} className="text-[9px] py-[2px]" style={{ color: "#5a6270" }}>
-                        <span style={{ color: "#3d4450" }}>{l.time}</span>{" "}
-                        <b style={{ color: l.action === "ENTER" ? "#00e87b" : l.action === "EXIT" ? "#4da6ff" : "#5a6270" }}>
-                          {l.symbol} {l.action}
-                        </b>{" "}
-                        {l.detail}
-                      </div>
-                    ))}
+                    {agent.log.map((l, i) => {
+                      const head = (
+                        <>
+                          <span style={{ color: "#3d4450" }}>{l.time}</span>{" "}
+                          <b style={{ color: l.action === "ENTER" ? "#00e87b" : l.action === "EXIT" ? "#4da6ff" : "#5a6270" }}>
+                            {l.symbol} {l.action}
+                          </b>{" "}
+                          {l.detail}
+                        </>
+                      );
+                      // Entries the risk gate decided carry their full verdict.
+                      // Show it on demand: the one-line reason says WHAT blocked,
+                      // the table says what every limit was and how close it came.
+                      if (!l.risk_checks) {
+                        return (
+                          <div key={i} className="text-[9px] py-[2px]" style={{ color: "#5a6270" }}>{head}</div>
+                        );
+                      }
+                      const rc = l.risk_checks;
+                      const nBlock = rc.checks.filter(c => c.status === "block").length;
+                      const nPass = rc.checks.filter(c => c.status === "pass").length;
+                      return (
+                        <details key={i} className="py-[2px]">
+                          <summary className="text-[9px] cursor-pointer" style={{ color: "#5a6270" }}>
+                            {head}{" "}
+                            <span style={{ color: "#ff3e3e" }}>[{nBlock} blocked</span>
+                            <span style={{ color: "#3d4450" }}> / {nPass} passed]</span>
+                          </summary>
+                          <div className="mt-1 mb-1 ml-3 p-2" style={{ background: "#0e1117", border: "1px solid #252a33" }}>
+                            {rc.checks.map((c, j) => {
+                              const col = c.status === "pass" ? "#00e87b"
+                                : c.status === "block" ? "#ff3e3e"
+                                : c.status === "warn" ? "#e8a200" : "#3d4450";
+                              const mark = c.status === "pass" ? "ok"
+                                : c.status === "block" ? "BLOCK"
+                                : c.status === "warn" ? "warn" : "--";
+                              return (
+                                <div key={j} className="text-[9px] leading-snug py-[1px] flex gap-2">
+                                  <span className="shrink-0 w-[34px] text-right" style={{ color: col }}>{mark}</span>
+                                  <span className="shrink-0 w-[110px]" style={{ color: "#c8cdd5" }}>{c.name}</span>
+                                  <span style={{ color: "#5a6270" }}>{c.detail}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </details>
+                      );
+                    })}
                   </div>
                 </details>
               )}
